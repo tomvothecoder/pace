@@ -141,6 +141,10 @@ tr:nth-child(even) {
                         <td class="wrap-me"><span style='color:crimson'>MPI tasks/node:</span></td>
                         <td class="wrap-me">{{exp.mpi_tasks_per_node}}</td>
                     </tr>
+                    <tr>
+                        <td class="wrap-me"><span style='color:crimson'>Est. Num. Nodes: <br> Total PEs/(MPI tasks/node):</span></td>
+                        <td class="wrap-me">{{(exp.total_pes_active/exp.mpi_tasks_per_node)}}</td>
+                    </tr>
                 </table>
                 <br>
                 <table>
