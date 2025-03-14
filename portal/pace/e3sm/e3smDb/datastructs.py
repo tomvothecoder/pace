@@ -42,7 +42,7 @@ class E3SMexp(db.Model):
     expid = db.Column(INTEGER(unsigned=True), primary_key=True, index=True)     
     case = db.Column(db.String(200),nullable=False, index=True)
     case_group = db.Column(db.String(200),nullable=True, index=True)
-    lid = db.Column(db.String(50), nullable=False)
+    lid = db.Column(db.String(150), nullable=False)
     machine = db.Column(db.String(25), nullable=False, index=True)
     compiler = db.Column(db.String(20), nullable=True, index=True)
     mpilib = db.Column(db.String(20), nullable=True, index=True)
