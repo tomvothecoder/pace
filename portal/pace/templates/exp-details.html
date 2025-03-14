@@ -143,7 +143,7 @@ tr:nth-child(even) {
                     </tr>
                     <tr>
                         <td class="wrap-me"><span style='color:crimson'>Est. Num. Nodes: <br> Total PEs/(MPI tasks/node):</span></td>
-                        <td class="wrap-me">{{(exp.total_pes_active/exp.mpi_tasks_per_node)}}</td>
+                        <td class="wrap-me">{{(exp.total_pes_active/exp.mpi_tasks_per_node).__ceil__()}}</td>
                     </tr>
                 </table>
                 <br>
