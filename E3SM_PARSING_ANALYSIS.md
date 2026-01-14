@@ -7,6 +7,97 @@
 
 ---
 
+## E3SM Metadata Parsing Flow Diagram
+
+The following diagram illustrates the complete metadata parsing flow from input artifacts to SimBoard-ready output:
+
+```mermaid
+flowchart TD
+    Start([Experiment Archive]) --> Extract[Extract ZIP/TAR.GZ]
+    Extract --> Discover[Discover exp* directories]
+    
+    Discover --> FindFiles[Locate Required Files]
+    FindFiles --> Check{All Required<br/>Files Present?}
+    
+    Check -->|No| Error1[Return Error:<br/>Missing Required Files]
+    Check -->|Yes| ParseTiming[Parse e3sm_timing.*]
+    
+    ParseTiming --> ExtractCore[Extract Core Metadata:<br/>case, machine, user, dates,<br/>grid, compset, run_config]
+    
+    ExtractCore --> ParseReadme[Parse README.case.*]
+    ParseReadme --> ExtractResComp[Extract:<br/>resolution short,<br/>compset short,<br/>creation_date]
+    
+    ExtractResComp --> ParseGit[Parse GIT_DESCRIBE.*]
+    ParseGit --> ExtractVersion[Extract:<br/>version string]
+    
+    ExtractVersion --> ParseEnvCase{Parse env_case.xml<br/>Optional}
+    ParseEnvCase -->|Success| ExtractGroup[Extract:<br/>case_group]
+    ParseEnvCase -->|Missing/Error| WarnGroup[Warning: NULL case_group]
+    
+    ExtractGroup --> ParseEnvBuild{Parse env_build.xml<br/>Optional}
+    WarnGroup --> ParseEnvBuild
+    
+    ParseEnvBuild -->|Success| ExtractCompiler[Extract:<br/>compiler, mpilib]
+    ParseEnvBuild -->|Missing/Error| WarnCompiler[Warning: NULL compiler]
+    
+    ExtractCompiler --> ParseScripts{Parse Scripts<br/>Optional}
+    WarnCompiler --> ParseScripts
+    
+    ParseScripts -->|Success| StoreScripts[Store replay.sh,<br/>run_e3sm.sh as artifacts]
+    ParseScripts -->|Missing/Error| SkipScripts[Skip scripts]
+    
+    StoreScripts --> Normalize[Normalize Metadata]
+    SkipScripts --> Normalize
+    
+    Normalize --> TransformMachine[Transform machine name<br/>to machine_id UUID]
+    TransformMachine --> ParseVersion[Parse git version string<br/>into tag + commit hash]
+    ParseVersion --> MapFields[Map to SimBoard schema:<br/>- Core fields<br/>- Extra metadata<br/>- Artifacts]
+    
+    MapFields --> CheckDup{Check for<br/>Duplicate?}
+    CheckDup -->|Exists| ReturnExisting[Return existing<br/>Simulation ID]
+    CheckDup -->|New| CreateSim[Create SimulationCreate<br/>object]
+    
+    CreateSim --> Output[Output SimBoard-ready<br/>metadata JSON]
+    ReturnExisting --> End([Complete])
+    Output --> End
+    
+    Error1 --> End
+    
+    style Start fill:#e1f5ff
+    style End fill:#e1f5ff
+    style Error1 fill:#ffe1e1
+    style Output fill:#e1ffe1
+    style Normalize fill:#fff4e1
+    style MapFields fill:#fff4e1
+```
+
+### Flow Diagram Legend
+
+**Input Artifacts:**
+- `e3sm_timing.*` - Main timing summary (REQUIRED)
+- `README.case.*` - Case creation metadata (REQUIRED)
+- `GIT_DESCRIBE.*` - E3SM version info (REQUIRED)
+- `CaseDocs.*/env_case.xml.*` - Case group (OPTIONAL)
+- `CaseDocs.*/env_build.xml.*` - Compiler info (OPTIONAL)
+- `replay.sh.*`, `run_e3sm.sh.*` - Scripts (OPTIONAL)
+
+**Key Parsing Steps:**
+1. **File Discovery** - Locate experiment directories and required files
+2. **Core Parsing** - Extract metadata from 3 required files (e3sm_timing, README.case, GIT_DESCRIBE)
+3. **Optional Parsing** - Extract additional metadata from XML files and scripts
+4. **Normalization** - Transform PACE data to SimBoard format
+5. **Validation** - Check for duplicates before creating new simulation
+
+**Output:**
+- SimBoard `SimulationCreate` object with:
+  - Core fields (case_name, compset, grid, machine_id, etc.)
+  - Git version info (git_tag, git_commit_hash)
+  - Optional metadata (compiler, group_name, mpilib)
+  - Extra metadata (lid, user, run_config, etc.)
+  - Artifacts (scripts, if available)
+
+---
+
 ## 1. Parsing Entrypoints
 
 ### 1.1 Main Entry Function
