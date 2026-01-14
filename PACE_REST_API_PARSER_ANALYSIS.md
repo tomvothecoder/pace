@@ -845,6 +845,148 @@ elif firstWord == 'TOT':
 
 ## 4. REST Call Flow
 
+### 4.0 Cron-Driven Ingestion Flow Diagram
+
+The following Mermaid diagram illustrates the complete cron-driven REST API call flow from DOE HPC systems to PACE's database:
+
+```mermaid
+sequenceDiagram
+    participant Cron as DOE HPC Cron Job<br/>(NERSC, LCRC, etc.)
+    participant Client as pace-upload CLI<br/>(Python client)
+    participant Upload as /upload REST API<br/>(Flask endpoint)
+    participant FS as Filesystem Staging<br/>(UPLOAD_FOLDER)
+    participant Parse as /fileparse REST API<br/>(Flask endpoint)
+    participant Orch as parse.parseData()<br/>(Orchestrator)
+    participant E3SM as parseE3SM.parseData()<br/>(E3SM Parser)
+    participant Parsers as Individual Parsers<br/>(parseE3SMTiming, etc.)
+    participant DB as MySQL Database<br/>(13+ tables)
+    participant Minio as Minio Object Storage<br/>(Experiment archives)
+
+    Note over Cron: Nightly execution on HPC
+    Cron->>Client: Execute: pace-upload --exp-dir /path/to/exp
+    
+    Note over Client: Validate experiments<br/>Compress to zip
+    Client->>Client: Create pace-exps-{user}-{timestamp}.zip
+    
+    Client->>Upload: POST /upload<br/>multipart/form-data<br/>file=<zip>, filename=<name>
+    activate Upload
+    Upload->>Upload: Validate extension (.zip only)
+    Upload->>Upload: secure_filename()
+    Upload->>FS: Save to UPLOAD_FOLDER
+    FS-->>Upload: File saved
+    Upload-->>Client: Response: 'complete'
+    deactivate Upload
+    
+    Client->>Parse: POST /fileparse<br/>filename=<name><br/>user=<user><br/>project='e3sm'
+    activate Parse
+    Parse->>Parse: Validate user (regex)
+    Parse->>Parse: Validate filename (regex)
+    Parse->>Orch: Call parse.parseData(filename, user, project)
+    activate Orch
+    Orch->>Orch: Setup logging<br/>(redirect stdout/stderr)
+    Orch->>E3SM: Call parseE3SM.parseData(filename, user)
+    activate E3SM
+    
+    E3SM->>FS: Extract zip to UPLOAD_FOLDER
+    E3SM->>FS: Extract tar.gz files
+    E3SM->>E3SM: Discover experiment directories (exp*)
+    E3SM->>E3SM: Collect file paths per experiment
+    
+    loop For each experiment
+        E3SM->>Parsers: parseE3SMTiming(e3sm_timing.*)
+        activate Parsers
+        Parsers-->>E3SM: metadata (20+ fields)
+        E3SM->>Parsers: parseReadMe(README.case.*)
+        Parsers-->>E3SM: res, compset
+        E3SM->>Parsers: parseModelVersion(GIT_DESCRIBE.*)
+        Parsers-->>E3SM: version
+        deactivate Parsers
+        
+        E3SM->>E3SM: Check for duplicate experiment
+        alt Duplicate found
+            E3SM->>E3SM: Skip experiment (log)
+        else New experiment
+            E3SM->>Parsers: parseModelTiming(timing.*.tar.gz)
+            activate Parsers
+            Parsers-->>E3SM: Per-rank timing trees (JSON)
+            E3SM->>Parsers: parseCaseDocs(CaseDocs.*)
+            Parsers-->>E3SM: XML, namelist, RC data
+            E3SM->>Parsers: parseMemoryProfile, parseScorpioStats, etc.
+            Parsers-->>E3SM: Optional performance data
+            deactivate Parsers
+            
+            E3SM->>E3SM: Create ORM objects
+            E3SM->>FS: Archive experiment (zip CaseDocs)
+            E3SM->>Minio: Upload archive to object storage
+            Minio-->>E3SM: Archive stored
+            
+            E3SM->>DB: db.session.add() for all tables
+            E3SM->>DB: db.session.commit()
+            DB-->>E3SM: Transaction committed
+            
+            E3SM->>E3SM: Log experiment summary<br/>(ExpID, User, Machine, URL)
+        end
+    end
+    
+    E3SM->>FS: Remove uploaded zip and extracted files
+    E3SM-->>Orch: Return 'success' or 'fail'
+    deactivate E3SM
+    Orch->>Orch: Close log files
+    Orch-->>Parse: Return status/logfilename
+    deactivate Orch
+    Parse-->>Client: Response: 'success/pace-{user}-{timestamp}.log'
+    deactivate Parse
+    
+    Client->>Parse: GET /downloadlog<br/>filename=<logfile>
+    activate Parse
+    Parse->>FS: Read log file from PACE_LOG_DIR
+    FS-->>Parse: Log content
+    Parse-->>Client: Log file download
+    deactivate Parse
+    
+    Note over Client: Display parse results<br/>Save log locally
+```
+
+**Diagram Key:**
+
+- **Solid arrows (→)**: Synchronous calls (blocking)
+- **Dashed arrows (-->>)**: Responses/returns
+- **Colored boxes**: Different system components
+- **activate/deactivate**: Shows when components are actively processing
+
+**Key Observations:**
+
+1. **Fully Synchronous**: The entire flow is blocking from `/fileparse` call to response
+2. **Cron-Initiated**: HPC cron jobs are the primary automation driver
+3. **Two-Stage API**: Upload and parse are separate HTTP calls
+4. **Filesystem as Intermediary**: Staging area decouples upload from parsing
+5. **Batch Processing**: Single `/fileparse` call can process multiple experiments
+6. **Continue-on-Error**: Duplicate or failed experiments don't abort the batch
+
+**Production Characteristics:**
+
+- **Nightly Execution**: Cron jobs run after E3SM simulations complete
+- **Non-Interactive**: No human involvement in normal operation
+- **Patient Clients**: Cron jobs wait for entire parse to complete (minutes)
+- **GitHub Auth**: Cron jobs use stored GitHub tokens for authentication
+- **Multi-Site**: Same flow runs on NERSC, LCRC, and other DOE facilities
+
+**Scalability Limitations:**
+
+- `/fileparse` blocks Flask worker for duration of parsing (minutes)
+- No progress updates during parsing
+- Limited concurrency (depends on Flask worker pool size)
+- Client timeout if parsing takes too long
+
+**SimBoard Adaptation Points:**
+
+1. **Break Synchronous Blocking**: Use FastAPI background tasks or Celery
+2. **Add Status Polling**: Return job ID immediately, provide `/status` endpoint
+3. **Parallelize Experiment Parsing**: Process multiple experiments concurrently
+4. **Decouple Authentication**: Use API keys instead of GitHub OAuth
+
+---
+
 ### 4.1 Upload Flow (`/upload`)
 
 **Location:** `portal/pace/webapp.py` lines 96-115
