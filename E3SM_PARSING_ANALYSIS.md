@@ -1,8 +1,9 @@
-# PACE E3SM Simulation Metadata Parsing Analysis
+# PACE E3SM Simulation Metadata Parsing Analysis for SimBoard
 
 **Date:** 2026-01-14  
-**Purpose:** Analyze PACE's E3SM simulation metadata parsing logic for reimplementation in SimBoard  
-**Scope:** Parser logic only (no Flask web app, database ORM, or authentication)
+**Purpose:** Analyze PACE's E3SM simulation metadata parsing logic for SimBoard reimplementation  
+**Scope:** **SimBoard-relevant metadata only** - configuration, provenance, and machine context  
+**Out of Scope:** Detailed timing profiles, memory dumps, performance analytics
 
 ---
 
@@ -61,418 +62,324 @@ Expected file patterns:
 
 ## 2. Input Artifacts
 
-### 2.1 Required Files
+### 2.1 Required Files for SimBoard
 
-**Critical Files (parsing fails without these):**
-- `e3sm_timing.*` - Main timing summary file
-- `README.case.*` - Case creation metadata
-- `GIT_DESCRIBE.*` - E3SM version information
+**Critical Files (SimBoard metadata requires these):**
+- `e3sm_timing.*` - Main timing summary file (for case, machine, dates, grid/compset)
+- `README.case.*` - Case creation metadata (for resolution and compset details)
+- `GIT_DESCRIBE.*` - E3SM version information (for git tag/hash)
+- `CaseDocs.*/env_case.xml.*` - Case configuration (for group name)
+- `CaseDocs.*/env_build.xml.*` - Build configuration (for compiler)
 
-**Optional Files (gracefully skipped if missing):**
-- `timing.*` - Detailed GPTL timing data (tar archive)
-- `spio_stats.*` - Scorpio I/O statistics (tar.gz containing JSON files)
-- `memory.*` - Memory profiling data (CSV format)
-- `build_times.txt.*` - Build time breakdown
-- `preview_run.log.*` - Job submission preview information
-- `replay.sh.*` - Replay script
-- `run_e3sm.sh.*` - Run script
-- `CaseDocs.*/` - Configuration files directory
+**Optional Files (enhance SimBoard metadata if available):**
+- `replay.sh.*` - Replay script (can be stored as artifact)
+- `run_e3sm.sh.*` - Run script (can be stored as artifact)
+- Other CaseDocs XML/namelist files (for extra metadata)
 
-### 2.2 Expected Directory Layout
+**Files NOT Needed for SimBoard:**
+- `timing.*` - Detailed GPTL timing data (performance analytics, not core metadata)
+- `spio_stats.*` - Scorpio I/O statistics (performance analytics)
+- `memory.*` - Memory profiling data (performance analytics)
+- `build_times.txt.*` - Build time breakdown (performance analytics)
+- `preview_run.log.*` - Job submission info (operational detail, not metadata)
+
+### 2.2 Expected Directory Layout (SimBoard Focus)
 
 ```
 upload_folder/
 └── experiment_name/         # e.g., "exp-username-12345"
-    ├── e3sm_timing.case_name.LID
-    ├── README.case.LID.gz
-    ├── GIT_DESCRIBE.LID.gz
-    ├── timing.case_name.LID.tar.gz
-    ├── spio_stats.LID.tar.gz
-    ├── memory.N.M.log.LID.gz
-    ├── build_times.txt.LID.gz
-    ├── preview_run.log.LID.gz
-    ├── replay.sh.LID.gz
-    ├── run_e3sm.sh.timestamp.LID.gz
-    └── CaseDocs.LID/
-        ├── env_case.xml.LID.gz
-        ├── env_build.xml.LID.gz
-        ├── env_run.xml.LID.gz
-        ├── env_batch.xml.LID.gz
-        ├── env_mach_pes.xml.LID.gz
-        ├── env_mach_specific.xml.LID.gz
-        ├── env_archive.xml.LID.gz
-        ├── env_workflow.xml.LID.gz
-        ├── namelist_scream.xml.LID.gz  (optional)
-        ├── atm_in.*.gz
-        ├── lnd_in.*.gz
-        ├── ice_in.*.gz
-        ├── ocn_in.*.gz  (or mpaso_in, mpassi_in)
-        ├── drv_in.*.gz
-        ├── mosart_in.*.gz
-        ├── user_nl_*.*.gz  (multiple files)
-        ├── *_modelio.nml.*.gz  (multiple files)
-        └── seq_maps.rc.*.gz
+    ├── e3sm_timing.case_name.LID          [REQUIRED]
+    ├── README.case.LID.gz                 [REQUIRED]
+    ├── GIT_DESCRIBE.LID.gz                [REQUIRED]
+    ├── replay.sh.LID.gz                   [OPTIONAL - artifact]
+    ├── run_e3sm.sh.timestamp.LID.gz       [OPTIONAL - artifact]
+    └── CaseDocs.LID/                      [REQUIRED]
+        ├── env_case.xml.LID.gz            [REQUIRED - group_name]
+        ├── env_build.xml.LID.gz           [REQUIRED - compiler]
+        ├── env_run.xml.LID.gz             [OPTIONAL - extra metadata]
+        └── (other XML/namelist files)     [OPTIONAL - extra metadata]
 ```
 
 **Notes:**
 - `LID` = Local ID timestamp (e.g., `43235257.210608-222102`)
-- Most files are gzipped (`.gz` extension)
-- Files may or may not be compressed depending on upload process
-- CaseDocs directory name includes LID: `CaseDocs.{LID}`
+- Files marked [REQUIRED] are needed for SimBoard core metadata
+- Files marked [OPTIONAL] can enhance SimBoard's `extra` field or artifacts
+- Performance files (timing.*, spio_stats.*, memory.*, build_times.txt.*) are NOT needed
 
-### 2.3 File Format Details
+### 2.3 File Format Details (SimBoard-Relevant Only)
 
-| File Type | Format | Compression | Parser Module |
-|-----------|--------|-------------|---------------|
-| e3sm_timing | Text | Optional .gz | parseE3SMTiming.py |
-| README.case | Text | .gz | parseReadMe.py |
-| GIT_DESCRIBE | Text | .gz | parseModelVersion.py |
-| timing | Tar archive | .tar.gz | parseModelTiming.py |
-| spio_stats | Tar w/ JSON files | .tar.gz | parseScorpioStats.py |
-| memory | CSV | .gz | parseMemoryProfile.py |
-| build_times.txt | Text (tabular) | .gz | parseBuildTime.py |
-| preview_run.log | Text | .gz | parsePreviewRun.py |
-| replay.sh | Bash script | .gz | parseReplaysh.py |
-| run_e3sm.sh | Bash script | .gz | parseRunE3SMsh.py |
-| XML files | XML | .gz | parseXML.py |
-| Namelist files | Fortran namelist | .gz | parseNameList.py |
-| RC files | Key:value pairs | .gz | parseRC.py |
-| user_nl_* | Text | .gz | parseText.py |
+| File Type | Format | Compression | Parser Module | SimBoard Use |
+|-----------|--------|-------------|---------------|--------------|
+| e3sm_timing | Text | Optional .gz | parseE3SMTiming.py | Core metadata extraction |
+| README.case | Text | .gz | parseReadMe.py | Resolution & compset |
+| GIT_DESCRIBE | Text | .gz | parseModelVersion.py | Git version info |
+| env_case.xml | XML | .gz | parseXML.py | Group name |
+| env_build.xml | XML | .gz | parseXML.py | Compiler info |
+| replay.sh | Bash script | .gz | parseReplaysh.py | Artifact storage |
+| run_e3sm.sh | Bash script | .gz | parseRunE3SMsh.py | Artifact storage |
 
----
-
-## 3. Metadata Extraction
+## 3. Metadata Extraction (SimBoard-Relevant Fields Only)
 
 ### 3.1 Core Experiment Metadata (from e3sm_timing.*)
 
 **Source:** `parseE3SMTiming.parseE3SMtiming(filename)`  
 **File:** `portal/pace/e3sm/e3smParser/parseE3SMTiming.py`
 
-**Extracted Fields:**
+**SimBoard-Relevant Fields Extracted:**
 
-| Field | Source Pattern | Description |
-|-------|----------------|-------------|
-| case | `Case:` | Case name |
-| lid | `LID:` | Local ID (timestamp) |
-| machine | `Machine:` | HPC machine name |
-| caseroot | `Caseroot:` | Case directory path |
-| timeroot | `Timeroot:` | Timing tools directory |
-| user | `User:` | Username who ran simulation |
-| curr | `Curr Date:` | Current date/time of run |
-| long_res | `grid:` | Full grid specification |
-| long_compset | `compset:` | Full component set |
-| stop_option | `stop option:` | Stop criterion (e.g., "ndays") |
-| stop_n | `stop_n =` | Stop value |
-| run_length | `run length:` | Duration in days |
-| total_pes | `total pes active:` | Total active PEs |
-| mpi_task | `mpi tasks per node:` | MPI tasks per node |
-| pe_count | `pe count for cost estimate:` | PE count for cost |
-| model_cost | `Model Cost:` | Cost in pe-hrs/simulated_year |
-| model_throughput | `Model Throughput:` | Simulated years/day |
-| actual_ocn | `Actual Ocn Init Wait Time:` | Ocean init wait time |
-| init_time | `Init Time:` | Initialization time (seconds) |
-| run_time | `Run Time:` | Run time (seconds) |
-| final_time | `Final Time:` | Finalization time (seconds) |
+| Field | Source Pattern | SimBoard Mapping | Description |
+|-------|----------------|------------------|-------------|
+| case | `Case:` | `name`, `case_name` | Case name |
+| lid | `LID:` | `extra.lid` | Local ID (timestamp) |
+| machine | `Machine:` | `machine_id` (via lookup) | HPC machine name |
+| user | `User:` | `extra.user` | Username who ran simulation |
+| curr | `Curr Date:` | `simulation_start_date` | Current date/time of run |
+| long_res | `grid:` | `grid_resolution` | Full grid specification |
+| long_compset | `compset:` | `compset_alias` | Full component set |
+| stop_option | `stop option:` | `extra.stop_option` | Stop criterion (e.g., "ndays") |
+| stop_n | `stop_n =` | `extra.stop_n` | Stop value |
+| run_length | `run length:` | `extra.run_length` | Duration in days |
 
-**Component Table (PE Layout):**
+**Fields NOT Extracted for SimBoard:**
+- Performance metrics (total_pes, mpi_task, pe_count, model_cost, model_throughput)
+- Timing data (init_time, run_time, final_time, actual_ocn)
+- PE layout component table
+- Runtime metrics table
 
-Extracted from section starting with `component comp_pes root_pe tasks...`
-
-For each component (cpl, atm, lnd, ice, ocn, rof, glc, wav, iac, esp):
-- component name
-- comp_pes
-- root_pe
-- tasks
-- threads
-- instances
-- stride
-
-**Runtime Table:**
-
-Extracted from section starting with `TOT Run Time:`
-
-For each component and its COMM counterpart (11 entries):
-- component name (e.g., "TOT", "ATM", "ATM_COMM")
-- seconds
-- model_day (seconds/model-day)
-- model_years (model-years/wall-day)
+**Parsing Logic:**
+- Opens file (handles gzipped or plain text)
+- Scans line-by-line for key-value patterns
+- Extracts fields using string splitting and pattern matching
+- Returns dictionary with extracted values
 
 ### 3.2 Case Creation Metadata (from README.case.*)
 
 **Source:** `parseReadMe.parseReadme(readmefilename)`  
 **File:** `portal/pace/e3sm/e3smParser/parseReadMe.py`
 
-**Extracted Fields:**
+**SimBoard-Relevant Fields:**
 
-| Field | Source | Description |
-|-------|--------|-------------|
-| res | `--res` argument | Resolution (e.g., "ne30_ne30") |
-| compset | `--compset` argument | Component set (e.g., "F2010") |
-| date | Line prefix | Creation timestamp |
+| Field | Source | SimBoard Mapping | Description |
+|-------|--------|------------------|-------------|
+| res | `--res` argument | `grid_name` | Resolution (e.g., "ne30_ne30") |
+| compset | `--compset` argument | `compset` | Component set (e.g., "F2010") |
+| date | Line prefix | `extra.creation_date` | Case creation timestamp |
 
 **Parsing Logic:**
 - Searches for line containing `create_newcase`
 - Extracts command-line arguments
 - Handles both `--arg=value` and `--arg value` formats
+- Returns dictionary with res, compset, date
 
 ### 3.3 Version Information (from GIT_DESCRIBE.*)
 
 **Source:** `parseModelVersion.parseModelVersion(gitfile)`  
 **File:** `portal/pace/e3sm/e3smParser/parseModelVersion.py`
 
-**Extracted Field:**
+**SimBoard-Relevant Field:**
 - version: First non-empty line (e.g., "v2.0.0-beta.3-3091-g3219b44fc")
 
-### 3.4 Model Timing Data (from timing.*)
+**SimBoard Mapping:**
+- Parse to extract `git_tag` (e.g., "v2.0.0-beta.3")
+- Parse to extract `git_commit_hash` (e.g., "3219b44fc")
 
-**Source:** `parseModelTiming.parse(source)`  
-**File:** `portal/pace/e3sm/e3smParser/parseModelTiming.py`
+**Parsing Logic:**
+- Opens file (handles gzipped or plain text)
+- Reads first non-empty line
+- Returns version string as-is
 
-**Format:** Tar archive containing GPTL (General Purpose Timing Library) output files
-
-**Extracted per rank/thread:**
-- Hierarchical timing tree structure (JSON)
-- For each timer:
-  - name
-  - on (boolean, if active)
-  - called, recurse counts
-  - wallClock, max, min times
-  - processes, threads, count
-  - walltotal, wallmax, wallmin
-  - multiParent flag
-
-**Parser Configurations:**
-
-Three GPTL format versions supported:
-1. Old format: `Stats for thread` files
-2. GPTL v1: `GLOBAL STATISTICS` without 'on' column
-3. GPTL v2: `GLOBAL STATISTICS` with 'on' column
-
-### 3.5 Scorpio I/O Statistics (from spio_stats.*)
-
-**Source:** `parseScorpioStats.loaddb_scorpio_stats(spiofile, runTime)`  
-**File:** `portal/pace/e3sm/e3smParser/parseScorpioStats.py`
-
-**Format:** Tar.gz archive containing JSON files (one per component)
-
-**Extracted per component:**
-- name: Component name (derived from max tot_time model)
-- data: Raw JSON data
-- iopercent: I/O time as % of total runtime
-- iotime: Total I/O time in seconds
-- version: Scorpio stats version
-
-**Logic:**
-- Extracts JSON files from tar archive
-- Identifies component with maximum tot_time
-- Calculates I/O percentage relative to run_time
-- Filters invalid entries (iopercent > 100, old unsupported versions)
-
-### 3.6 Memory Profile (from memory.*)
-
-**Source:** `parseMemoryProfile.loaddb_memfile(memfile)`  
-**File:** `portal/pace/e3sm/e3smParser/parseMemoryProfile.py`
-
-**Format:** CSV data (gzipped)
-
-**Extraction:** Stores entire CSV as-is (no parsing)
-
-### 3.7 Build Times (from build_times.txt.*)
-
-**Source:** `parseBuildTime.loaddb_buildTimesFile(buildfile)`  
-**File:** `portal/pace/e3sm/e3smParser/parseBuildTime.py`
-
-**Format:** Tab-separated values
-
-**Extracted:**
-- data: Dictionary of component → elapsed time
-- total_computecost: Sum of all build times (excluding Total_Elapsed_Time)
-- total_elapsed_time: Overall build duration
-
-**Logic:**
-- Skips header line
-- Aggregates repeated component names
-- Separates Total_Elapsed_Time from compute cost
-
-### 3.8 Preview Run Information (from preview_run.log.*)
-
-**Source:** `parsePreviewRun.load_previewRunFile(previewfile)`  
-**File:** `portal/pace/e3sm/e3smParser/parsePreviewRun.py`
-
-**Extracted Fields:**
-
-| Field | Source Pattern | Description |
-|-------|---------------|-------------|
-| nodes | `nodes:` | Number of nodes |
-| total_tasks | `total tasks:` | Total MPI tasks |
-| tasks_per_node | `tasks per node:` | Tasks per node |
-| thread_count | `thread count:` | Thread count |
-| ngpus_per_node | `ngpus per node:` | GPUs per node |
-| env | `ENV:` section | Environment variables dict |
-| omp_threads | From env['OMP_NUM_THREADS'] | OpenMP threads |
-| submit_cmd | `SUBMIT CMD:` | Job submission command |
-| mpirun | `MPIRUN CMD:` | MPI run command |
-
-**Logic:**
-- State machine parsing with flags
-- Reads next line after marker
-- Parses environment variable assignments
-
-### 3.9 Script Files (replay.sh.*, run_e3sm.sh.*)
-
-**Source:** `parseReplaysh.load_replayshFile()`, `parseRunE3SMsh.load_rune3smshfile()`  
-**Files:** `portal/pace/e3sm/e3smParser/parseReplaysh.py`, `parseRunE3SMsh.py`
-
-**Extraction:** Stores entire script content as-is
-
-### 3.10 CaseDocs Configuration Files
+### 3.4 CaseDocs Configuration Files
 
 **Source:** `parseCaseDocs.loaddb_casedocs(casedocpath, db, currExpObj)`  
 **File:** `portal/pace/e3sm/e3smParser/parseCaseDocs.py`
 
-**Categories:**
+#### A. env_case.xml - Case Group
 
-#### A. XML Files (env_*.xml, namelist_scream.xml)
+**Parser:** `parseXML.loaddb_xmlfile(xmlpath)` + `getCaseGroup(jsondata)`
 
-**Parser:** `parseXML.loaddb_xmlfile(xmlpath)`
+**SimBoard-Relevant Field:**
+- `case_group` from `CASE_GROUP` entry → SimBoard `group_name`
 
-**Accepted prefixes:**
-- env_archive, env_batch, env_build, env_case
-- env_mach_pes, env_mach_specific, env_run, env_workflow
-- namelist_scream
+**Parsing Logic:**
+1. Unzip XML file
+2. Parse XML to JSON via xmltodict
+3. Navigate to `file.group` array
+4. Find group with `@id='case_desc'`
+5. Find entry with `@id='CASE_GROUP'`
+6. Extract `@value`
 
-**Format:** XML → JSON via xmltodict
+#### B. env_build.xml - Compiler Info
 
-**Special Processing:**
+**Parser:** `parseXML.loaddb_xmlfile(xmlpath)` + `getEnvBuild(jsondata)`
 
-1. **env_case.xml:**
-   - Extracts `case_group` from `CASE_GROUP` entry
-   - Updates E3SMexp.case_group field
+**SimBoard-Relevant Fields:**
+- `compiler` from `COMPILER` entry → SimBoard `compiler`
+- `mpilib` from `MPILIB` entry → SimBoard `extra.mpilib`
 
-2. **env_build.xml:**
-   - Extracts `compiler` from `COMPILER` entry
-   - Extracts `mpilib` from `MPILIB` entry
-   - Updates E3SMexp.compiler and E3SMexp.mpilib fields
+**Parsing Logic:**
+1. Unzip and parse XML to JSON
+2. Navigate to `file.group` array
+3. Find group with `@id='build_macros'`
+4. Extract `COMPILER` and `MPILIB` entry values
 
-#### B. Namelist Files
+### 3.5 Script Files (Optional Artifacts)
 
-**Parser:** `parseNameList.loaddb_namelist(nmlpath)`
+**Source:** `parseReplaysh.load_replayshFile()`, `parseRunE3SMsh.load_rune3smshfile()`  
+**Files:** `portal/pace/e3sm/e3smParser/parseReplaysh.py`, `parseRunE3SMsh.py`
 
-**Accepted prefixes:**
-- atm_in, atm_modelio, cpl_modelio, drv_flds_in, drv_in
-- esp_modelio, glc_modelio, ice_modelio, lnd_in, lnd_modelio
-- mosart_in, mpaso_in, mpassi_in, ocn_modelio, rof_modelio
-- user_nl_cam, user_nl_clm, user_nl_cpl, user_nl_mosart
-- user_nl_mpascice, user_nl_mpaso, wav_modelio, iac_modelio
-- docn_in, user_nl_docn, user_nl_cice, ice_in
-- user_nl_elm, user_nl_eam, user_nl_mali, mali_in
-
-**Format:**
-- Most: Fortran namelist → JSON via f90nml library
-- user_nl_*: Plain text (via parseText.py)
-
-#### C. RC Files (seq_maps.rc.*)
-
-**Parser:** `parseRC.loaddb_rcfile(rcpath)`
-
-**Format:** Key:value pairs → JSON object
+**SimBoard Use:**
+- Store as artifacts with `ArtifactKind.RUN_SCRIPT`
+- Extraction: Read entire gzipped file content as text
 
 ---
 
-## 4. Control Flow
+## 4. Control Flow (SimBoard Metadata Extraction)
 
-### 4.1 Overall Parsing Sequence
+### 4.1 Minimal Parsing Sequence for SimBoard
 
-**Order of operations (from parseE3SM.py:insertExperiment):**
+For SimBoard ingestion, only these parsing steps are required:
 
-1. **Parse e3sm_timing file** (`insertE3SMTiming`)
-   - Parses e3sm_timing.*
-   - Parses README.case.*
-   - Parses GIT_DESCRIBE.*
-   - Checks for duplicates (user + machine + exp_date + case)
-   - Creates E3SMexp, Exp, Pelayout, Runtime records
-   - Returns early if duplicate found
+**Step 1: Parse e3sm_timing file**
+- Function: `parseE3SMTiming.parseE3SMtiming(filename)` 
+- Extracts: case, lid, machine, user, exp_date, long_res, long_compset, stop_option, stop_n, run_length
+- **Required:** YES - Fails if missing
 
-2. **Parse model timing** (`insertTiming`)
-   - Extracts files from timing.* tar archive
-   - Parses GPTL output per rank
-   - Creates ModelTiming records
+**Step 2: Parse README.case file**
+- Function: `parseReadMe.parseReadme(readmefilename)`
+- Extracts: res (short), compset (short), creation_date
+- **Required:** YES - Fails if missing
 
-3. **Parse memory file** (`insertMemoryFile`)
-   - Stores CSV data
-   - Creates MemfileInputs record
+**Step 3: Parse GIT_DESCRIBE file**
+- Function: `parseModelVersion.parseModelVersion(gitfile)`
+- Extracts: version string
+- **Required:** YES - Fails if missing
 
-4. **Parse Scorpio stats** (`insertScorpioStats`)
-   - Extracts JSON files from tar.gz
-   - Processes each component
-   - Creates ScorpioStats records
+**Step 4: Parse CaseDocs/env_case.xml**
+- Function: `parseXML.loaddb_xmlfile()` + `getCaseGroup()`
+- Extracts: case_group
+- **Required:** NO - Gracefully skipped if missing
 
-5. **Parse CaseDocs** (`parseCaseDocs.loaddb_casedocs`)
-   - Iterates through all files in directory
-   - Routes to appropriate parser based on prefix
-   - Extracts case_group, compiler, mpilib
-   - Creates NamelistInputs, XMLInputs, RCInputs records
+**Step 5: Parse CaseDocs/env_build.xml**
+- Function: `parseXML.loaddb_xmlfile()` + `getEnvBuild()`
+- Extracts: compiler, mpilib
+- **Required:** NO - Gracefully skipped if missing
 
-6. **Parse build times** (`insertBuildTimeFile`)
-   - Creates BuildTime record
+**Step 6: (Optional) Store replay.sh and run_e3sm.sh as artifacts**
+- Function: `parseReplaysh.load_replayshFile()`, `parseRunE3SMsh.load_rune3smshfile()`
+- Stores: Script content for artifact storage
+- **Required:** NO - Gracefully skipped if missing
 
-7. **Parse preview run** (`insertPreviewRunFile`)
-   - Creates PreviewRun record
+### 4.2 Steps NOT Needed for SimBoard
 
-8. **Parse scripts** (`insertScripts`)
-   - Parses replay.sh and run_e3sm.sh
-   - Creates ScriptsFile records
+PACE's full parsing includes these steps that SimBoard doesn't need:
 
-9. **Archive raw data**
-   - Zips experiment directory
-   - Uploads to MinIO object storage
+- ❌ **Parse timing.* (model timing)** - Performance data, not metadata
+- ❌ **Parse spio_stats.* (I/O stats)** - Performance data, not metadata
+- ❌ **Parse memory.* (memory profile)** - Performance data, not metadata
+- ❌ **Parse build_times.txt** - Build performance, not metadata
+- ❌ **Parse preview_run.log** - Job submission details, not core metadata
+- ❌ **Parse other CaseDocs files** - Optional unless storing as extra metadata
+- ❌ **Insert PE layout table** - Performance data, not metadata
+- ❌ **Insert component runtime table** - Performance data, not metadata
+- ❌ **Store in MinIO** - SimBoard handles its own storage
 
-10. **Commit to database**
-    - Single transaction commit
-    - Rollback on any error
+### 4.3 Error Handling for SimBoard
 
-### 4.2 Error Handling Behavior
+**Strategy:** Fail-fast for required metadata, skip-on-error for optional
 
-**Strategy:** Fail-safe with skip-on-error
+**Required Files Missing:**
+- If e3sm_timing.*, README.case.*, or GIT_DESCRIBE.* missing → Return error, do not create Simulation
+- Error message: "Missing required file: {filename}"
 
-- **Missing optional files:** Prints warning, continues parsing
-- **Parse errors:** Prints error, returns False, skips experiment
-- **Duplicate experiments:** Prints note, returns True, skips experiment
-- **Database errors:** Prints error, rolls back transaction, returns False
+**Optional Files Missing:**
+- If CaseDocs XML files missing → Log warning, continue with NULL values
+- Warning message: "No {filename} file, setting {field} to NULL"
 
-**Error Messages Format:**
+**Parse Errors:**
+- If required file parsing fails → Return error, do not create Simulation
+- If optional file parsing fails → Log warning, continue
+
+**Example Error Handling:**
+```python
+def parse_for_simboard(exp_dir):
+    result = {
+        'success': False,
+        'data': {},
+        'errors': [],
+        'warnings': []
+    }
+    
+    # Required: e3sm_timing
+    e3sm_timing_file = find_file(exp_dir, 'e3sm_timing.*')
+    if not e3sm_timing_file:
+        result['errors'].append("Missing required file: e3sm_timing.*")
+        return result
+    
+    try:
+        timing_data = parseE3SMTiming.parseE3SMtiming(e3sm_timing_file)
+        result['data'].update(timing_data)
+    except Exception as e:
+        result['errors'].append(f"Failed to parse e3sm_timing: {e}")
+        return result
+    
+    # Required: README.case
+    readme_file = find_file(exp_dir, 'README.case.*')
+    if not readme_file:
+        result['errors'].append("Missing required file: README.case.*")
+        return result
+    
+    try:
+        readme_data = parseReadMe.parseReadme(readme_file)
+        result['data'].update(readme_data)
+    except Exception as e:
+        result['errors'].append(f"Failed to parse README.case: {e}")
+        return result
+    
+    # Required: GIT_DESCRIBE
+    git_file = find_file(exp_dir, 'GIT_DESCRIBE.*')
+    if not git_file:
+        result['errors'].append("Missing required file: GIT_DESCRIBE.*")
+        return result
+    
+    try:
+        version = parseModelVersion.parseModelVersion(git_file)
+        result['data']['version'] = version
+    except Exception as e:
+        result['errors'].append(f"Failed to parse GIT_DESCRIBE: {e}")
+        return result
+    
+    # Optional: env_case.xml
+    env_case = find_file(exp_dir, 'CaseDocs.*/env_case.xml.*')
+    if env_case:
+        try:
+            xml_data = parseXML.loaddb_xmlfile(env_case)
+            case_group = getCaseGroup(json.loads(xml_data))
+            result['data']['case_group'] = case_group
+        except Exception as e:
+            result['warnings'].append(f"Failed to parse env_case.xml: {e}")
+    
+    # Optional: env_build.xml
+    env_build = find_file(exp_dir, 'CaseDocs.*/env_build.xml.*')
+    if env_build:
+        try:
+            xml_data = parseXML.loaddb_xmlfile(env_build)
+            build_data = getEnvBuild(json.loads(xml_data))
+            result['data'].update(build_data)
+        except Exception as e:
+            result['warnings'].append(f"Failed to parse env_build.xml: {e}")
+    
+    result['success'] = len(result['errors']) == 0
+    return result
 ```
-print("Empty memory profile file")              # Warning
-print("ERROR: %s" % e)                          # Error
-print("Insertion is discarded due to duplication")  # Info
-```
 
-**Return Values:**
-- `True` → Success or duplicate (skip remaining files)
-- `False` → Failure (abort this experiment)
+### 4.4 Duplicate Detection
 
-### 4.3 Optional vs Required Metadata
+PACE checks for duplicates using: `(user, machine, exp_date, case)`
 
-**Required (parsing fails without these):**
-- e3sm_timing.* file
-- README.case.* file
-- GIT_DESCRIBE.* file
-- Valid experiment metadata (case, user, machine, etc.)
-
-**Optional (gracefully skipped):**
-- timing.* (model timing)
-- spio_stats.* (Scorpio I/O stats)
-- memory.* (memory profile)
-- build_times.txt.* (build times)
-- preview_run.log.* (preview run info)
-- replay.sh.* (replay script)
-- run_e3sm.sh.* (run script)
-- Any CaseDocs files
-
-**Behavior on Missing Files:**
-- Parser checks `if file:` before calling parse function
-- Prints `"No <file_type> file"` message
-- Returns `True` to continue processing
+**SimBoard should adapt this to:**
+- Check if Simulation already exists with same `(case_name, machine_id, simulation_start_date)`
+- Return existing Simulation ID if found
+- Do not parse or create duplicate
 
 ---
 
@@ -558,7 +465,304 @@ Example: Wed Jun  9 01:07:55 2021
 
 ---
 
-## 6. Suggested Neutral Schema
+## 6. Mapping to SimBoard Schema
+
+### 6.1 SimBoard Schema Reference
+
+SimBoard's Pydantic schema is defined at:
+https://github.com/E3SM-Project/simboard/blob/main/backend/app/features/simulation/schemas.py
+
+**Important Notes:**
+- This mapping is NON-BINDING guidance
+- SimBoard schema may evolve independently of PACE
+- Not all PACE fields have SimBoard equivalents
+- Not all SimBoard fields can be derived from PACE data
+
+### 6.2 Direct Field Mappings
+
+Fields that PACE can directly populate in SimBoard's `SimulationCreate` schema:
+
+| SimBoard Field | PACE Source | PACE Field/File | Notes |
+|----------------|-------------|-----------------|-------|
+| **Configuration** | | | |
+| `name` | e3sm_timing | `case` | Case name |
+| `case_name` | e3sm_timing | `case` | Same as name |
+| `description` | N/A | - | Not extracted by PACE |
+| `compset` | README.case | `compset` (short) | e.g., "F2010" |
+| `compset_alias` | e3sm_timing | `long_compset` | Full component set string |
+| `grid_name` | README.case | `res` (short) | e.g., "ne30_ne30" |
+| `grid_resolution` | e3sm_timing | `long_res` | Full grid specification |
+| `parent_simulation_id` | N/A | - | Not tracked by PACE |
+| **Model setup/context** | | | |
+| `simulation_type` | N/A | - | Could infer from compset |
+| `status` | N/A | - | PACE only stores completed runs |
+| `campaign_id` | N/A | - | Not tracked by PACE |
+| `experiment_type_id` | N/A | - | Not tracked by PACE |
+| `initialization_type` | e3sm_timing | `run_type` | From "run type" line |
+| `group_name` | env_case.xml | `case_group` | From CASE_GROUP entry |
+| **Model timeline** | | | |
+| `machine_id` | N/A | - | PACE has machine name, not UUID |
+| `simulation_start_date` | e3sm_timing | `exp_date` | From "Curr Date" |
+| `simulation_end_date` | N/A | - | Not explicitly tracked |
+| `run_start_date` | N/A | - | Not explicitly tracked |
+| `run_end_date` | N/A | - | Not explicitly tracked |
+| `compiler` | env_build.xml | `compiler` | From COMPILER entry |
+| **Version control** | | | |
+| `git_repository_url` | N/A | - | Not tracked by PACE |
+| `git_branch` | N/A | - | Not tracked by PACE |
+| `git_tag` | GIT_DESCRIBE | `version` | Git describe string |
+| `git_commit_hash` | GIT_DESCRIBE | `version` | Extract hash from git describe |
+| **Provenance** | | | |
+| `created_by` | N/A | - | SimBoard assigns at creation |
+| `last_updated_by` | N/A | - | SimBoard assigns at update |
+| **Miscellaneous** | | | |
+| `key_features` | N/A | - | Not tracked by PACE |
+| `known_issues` | N/A | - | Not tracked by PACE |
+| `notes_markdown` | N/A | - | Not tracked by PACE |
+| `extra` | Multiple | Performance, PE layout, etc. | See Section 6.3 |
+
+### 6.3 PACE Fields Not in SimBoard Core Schema
+
+Fields extracted by PACE that should go into SimBoard's `extra` dictionary:
+
+**Performance Metrics:**
+- `total_pes_active` - Total active PEs
+- `mpi_tasks_per_node` - MPI tasks per node
+- `pe_count_for_cost_estimate` - PE count for cost estimation
+- `model_cost` - Cost in pe-hrs/simulated_year
+- `model_throughput` - Simulated years/day
+- `init_time` - Initialization time (seconds)
+- `run_time` - Run time (seconds)
+- `final_time` - Finalization time (seconds)
+- `actual_ocn_init_wait_time` - Ocean init wait time
+
+**Run Configuration:**
+- `stop_option` - Stop criterion (e.g., "nmonths")
+- `stop_n` - Stop value
+- `run_length` - Duration in days
+- `continue_run` - Boolean from run type
+- `lid` - Local ID timestamp
+- `caseroot` - Case directory path
+- `timeroot` - Timing tools directory path
+- `user` - Username who ran simulation
+- `mpilib` - MPI library used
+
+**PE Layout (array of components):**
+- `component` - Component name
+- `comp_pes` - Component PEs
+- `root_pe` - Root PE
+- `tasks` - Number of tasks
+- `threads` - Number of threads
+- `instances` - Number of instances
+- `stride` - Stride value
+
+**Component Runtime (array):**
+- `component` - Component name
+- `seconds` - Total seconds
+- `model_day` - Seconds per model day
+- `model_years` - Model years per wall day
+
+**Job Configuration:**
+- `nodes` - Number of nodes
+- `total_tasks` - Total MPI tasks
+- `tasks_per_node` - Tasks per node
+- `thread_count` - Thread count
+- `ngpus_per_node` - GPUs per node
+- `omp_threads` - OMP_NUM_THREADS value
+- `mpirun_cmd` - MPI run command
+- `submit_cmd` - Job submission command
+- `environment` - Environment variables dict
+
+**Build Information:**
+- `total_compute_cost` - Build time cost
+- `total_elapsed_time` - Total build elapsed time
+- `component_times` - Build times by component
+
+**I/O Statistics (Scorpio):**
+- `name` - Component name
+- `iotime` - I/O time in seconds
+- `iopercent` - I/O percentage of runtime
+- `version` - Scorpio stats version
+- `raw_data` - Full JSON data
+
+**Timing Profiles (GPTL):**
+- `rank` - Rank number or "stats"
+- `data` - Hierarchical timing tree JSON
+
+**Configuration Files:**
+- `namelists` - Parsed Fortran namelists
+- `xml_configs` - Parsed XML configuration
+- `rc_files` - Parsed RC files
+
+**Scripts:**
+- `replay_sh` - Replay script content
+- `run_e3sm_sh` - Run script content
+
+**Diagnostics:**
+- `memory_profile_csv` - Raw CSV memory data
+
+### 6.4 SimBoard Fields Not Derivable from PACE
+
+SimBoard fields that PACE cannot populate (require external data or manual input):
+
+| SimBoard Field | Reason Not Available |
+|----------------|----------------------|
+| `description` | Free-text field, not in PACE |
+| `simulation_type` | Could be inferred but not explicit |
+| `status` | PACE only stores completed experiments |
+| `campaign_id` | Campaign tracking not in PACE |
+| `experiment_type_id` | Experiment type taxonomy not in PACE |
+| `parent_simulation_id` | Parent-child relationships not tracked |
+| `machine_id` | PACE has machine name string, not UUID reference |
+| `simulation_end_date` | Only experiment date available |
+| `run_start_date` | Not explicitly tracked |
+| `run_end_date` | Not explicitly tracked |
+| `git_repository_url` | Repository URL not stored |
+| `git_branch` | Branch name not stored |
+| `key_features` | Free-text field, not in PACE |
+| `known_issues` | Free-text field, not in PACE |
+| `notes_markdown` | Free-text field, not in PACE |
+
+### 6.5 Semantic Mismatches and Naming Differences
+
+**1. Machine Reference**
+- **PACE:** Stores machine name as string (e.g., "cori-knl")
+- **SimBoard:** Expects `machine_id` as UUID foreign key
+- **Resolution:** SimBoard must maintain a machine registry and map PACE names to UUIDs
+
+**2. Git Version Information**
+- **PACE:** Single `version` field with git describe output (e.g., "v2.0.0-beta.3-3091-g3219b44fc")
+- **SimBoard:** Separate fields for `git_tag` and `git_commit_hash`
+- **Resolution:** Parse git describe string to extract tag and hash components
+
+**3. Compset Naming**
+- **PACE:** `compset` (short) and `long_compset` (full)
+- **SimBoard:** `compset` and `compset_alias` with potentially reversed semantics
+- **Resolution:** Map PACE's short compset → SimBoard's `compset`, long → `compset_alias`
+
+**4. Grid/Resolution Naming**
+- **PACE:** `res` (short) and `long_res` (full grid spec)
+- **SimBoard:** `grid_name` and `grid_resolution`
+- **Resolution:** Map PACE's short res → SimBoard's `grid_name`, long → `grid_resolution`
+
+**5. Timestamps**
+- **PACE:** Single `exp_date` for experiment execution
+- **SimBoard:** Separate `simulation_start_date`, `simulation_end_date`, `run_start_date`, `run_end_date`
+- **Resolution:** Map `exp_date` to `simulation_start_date`; calculate end dates from duration if needed
+
+**6. Initialization Type**
+- **PACE:** Free-form text from e3sm_timing (e.g., "startup, continue_run = TRUE")
+- **SimBoard:** Single `initialization_type` field
+- **Resolution:** Parse and normalize to standard values
+
+**7. Performance Data Location**
+- **PACE:** Stored as separate DB tables (E3SMexp, Pelayout, Runtime, ModelTiming, etc.)
+- **SimBoard:** Expects `extra` dict or separate related tables
+- **Resolution:** Serialize PACE performance data into `extra` JSON field
+
+### 6.6 Artifact Mapping
+
+PACE files can be mapped to SimBoard's `artifacts` relationship:
+
+| PACE File | SimBoard ArtifactKind | Notes |
+|-----------|----------------------|-------|
+| `replay.sh` | `RUN_SCRIPT` | Replay script |
+| `run_e3sm.sh` | `RUN_SCRIPT` | Run script |
+| `timing.*` | `ARCHIVE` | GPTL timing archive |
+| `spio_stats.*` | `ARCHIVE` | Scorpio I/O stats archive |
+| `memory.*` | `OUTPUT` | Memory profile CSV |
+| `build_times.txt` | `OUTPUT` | Build times log |
+| `CaseDocs/` | `ARCHIVE` | Configuration archive |
+
+**Artifact URI Strategy:**
+- Store MinIO object storage path (e.g., `minio://e3sm/exp-username-12345.zip`)
+- Or store full experiment archive as single artifact
+
+### 6.7 External Link Mapping
+
+PACE data doesn't contain external links, but SimBoard could generate:
+
+| Link Type | Source | Example |
+|-----------|--------|---------|
+| `PERFORMANCE` | PACE web URL | `https://pace.ornl.gov/exp-details/{expid}` |
+| `DIAGNOSTIC` | Generated after ingestion | Links to diagnostic plots |
+| `DOCS` | E3SM documentation | Version-specific docs |
+
+### 6.8 Recommended SimBoard Ingestion Strategy
+
+**Approach 1: Core Fields + Extra**
+```python
+simulation = SimulationCreate(
+    # Core fields directly mapped
+    name=pace_data['case'],
+    case_name=pace_data['case'],
+    compset=pace_data['compset_short'],
+    compset_alias=pace_data['compset_long'],
+    grid_name=pace_data['res_short'],
+    grid_resolution=pace_data['res_long'],
+    
+    # Derived fields
+    machine_id=machine_registry.lookup(pace_data['machine']),
+    simulation_start_date=pace_data['exp_date'],
+    compiler=pace_data['compiler'],
+    
+    # Git info parsed from git describe
+    git_tag=extract_tag(pace_data['version']),
+    git_commit_hash=extract_hash(pace_data['version']),
+    
+    # Status and type
+    status=SimulationStatus.COMPLETED,
+    simulation_type="e3sm_simulation",
+    initialization_type=parse_init_type(pace_data['run_type']),
+    
+    # Everything else in extra
+    extra={
+        "pace": {
+            "lid": pace_data['lid'],
+            "user": pace_data['user'],
+            "performance": {...},
+            "pe_layout": [...],
+            "component_runtime": [...],
+            "job_config": {...},
+            "build_info": {...},
+            "io_stats": {...},
+            "timing_profiles": [...],
+            "configuration": {...},
+        }
+    },
+    
+    # Artifacts
+    artifacts=[
+        ArtifactCreate(
+            kind=ArtifactKind.ARCHIVE,
+            uri=f"minio://e3sm/exp-{user}-{expid}.zip",
+            label="Complete experiment archive"
+        )
+    ],
+    
+    # Links
+    links=[
+        ExternalLinkCreate(
+            kind=ExternalLinkKind.PERFORMANCE,
+            url=f"https://pace.ornl.gov/exp-details/{expid}",
+            label="PACE Performance Dashboard"
+        )
+    ]
+)
+```
+
+**Approach 2: Minimal Core + Separate Performance Tables**
+
+If SimBoard adds dedicated performance tables (like PACE), map directly:
+- Create `Simulation` with core metadata
+- Create related `PELayout` records for each component
+- Create related `ComponentRuntime` records
+- Create related `TimingProfile` records
+- Store raw files as artifacts
+
+---
+
+## 7. Suggested Neutral Schema
 
 ### 6.1 Design Principles
 
