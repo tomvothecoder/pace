@@ -1,8 +1,9 @@
 # PACE REST API → Parser Call Flow Analysis
 
-**Date:** 2026-01-14  
+**Date:** 2026-01-14 (Updated: 2026-01-14)  
 **Purpose:** Reference document for SimBoard to understand PACE's REST-to-parser flow for cron-driven ingestion  
-**Status:** ANALYSIS ONLY - No code modifications
+**Status:** ANALYSIS ONLY - No code modifications  
+**Revision:** 2 - Incorporated corrected understanding of E3SM parsing entrypoints, filesystem layout, and field-level metadata derivation
 
 ---
 
@@ -14,22 +15,837 @@ This document analyzes the call flow between PACE's REST APIs and the E3SM parsi
 
 The flow is designed for **automated, cron-driven ingestion** from HPC systems where jobs call the REST APIs directly (non-interactive).
 
+**Key Corrections (Revision 2):**
+- Clarified E3SM parser entrypoint functions and their contracts
+- Documented required filesystem layout with file location expectations
+- Added comprehensive field-level metadata derivation mapping showing which files provide which fields
+
 ---
 
 ## Table of Contents
 
-1. [REST Call Flow](#1-rest-call-flow)
-2. [Data Handoff Points](#2-data-handoff-points)
-3. [Control Decisions](#3-control-decisions)
-4. [Side Effects](#4-side-effects)
-5. [Transferable Patterns](#5-transferable-patterns)
-6. [SimBoard Relevance](#6-simboard-relevance)
+1. [E3SM Parser Entrypoints & Contracts](#1-e3sm-parser-entrypoints--contracts) **[NEW]**
+2. [Required Filesystem Layout](#2-required-filesystem-layout) **[NEW]**
+3. [Field-Level Metadata Derivation](#3-field-level-metadata-derivation) **[NEW]**
+4. [REST Call Flow](#4-rest-call-flow)
+5. [Data Handoff Points](#5-data-handoff-points)
+6. [Control Decisions](#6-control-decisions)
+7. [Side Effects](#7-side-effects)
+8. [Transferable Patterns](#8-transferable-patterns)
+9. [SimBoard Relevance](#9-simboard-relevance)
 
 ---
 
-## 1. REST Call Flow
+## 1. E3SM Parser Entrypoints & Contracts
 
-### 1.1 Upload Flow (`/upload`)
+This section documents the **public entrypoint functions** for E3SM parsing, their signatures, required inputs, and outputs. These represent the minimal invocation contract that any system (including SimBoard) must satisfy to parse E3SM experiment data.
+
+### 4.1 Primary Entrypoint: `parseE3SM.parseData()`
+
+**Location:** `portal/pace/e3sm/e3smParser/parseE3SM.py:65-184`
+
+**Function Signature:**
+```python
+def parseData(zipfilename: str, uploaduser: str) -> str:
+    """
+    Parse E3SM experiments from uploaded zip file.
+    
+    Args:
+        zipfilename: Name of zip file in UPLOAD_FOLDER (e.g., 'pace-exps-user-timestamp.zip')
+        uploaduser: GitHub username of uploader (for attribution)
+    
+    Returns:
+        'success' if all experiments parsed successfully
+        'fail' if any experiment failed
+        'ERROR' if fatal error occurred
+    """
+```
+
+**Preconditions:**
+1. Zip file exists at `{UPLOAD_FOLDER}/{zipfilename}`
+2. Zip contains directory structure: `{filename-without-ext}/exp*/`
+3. Each `exp*` directory contains required E3SM files (see section 2)
+4. Database connection initialized via `pace_common.initDatabase()`
+5. Global directories set: `PACE_LOG_DIR`, `EXP_DIR`, `UPLOAD_FOLDER`
+
+**Side Effects:**
+1. Extracts zip to `{UPLOAD_FOLDER}/`
+2. Creates log files in `PACE_LOG_DIR`
+3. Inserts records into 13+ database tables
+4. Creates archive zip in `EXP_DIR`
+5. Uploads archive to Minio object storage
+6. Deletes extracted files from `UPLOAD_FOLDER`
+
+**Orchestration Flow:**
+```
+parseData()
+  ├─ Extract zip and tar.gz files
+  ├─ Discover experiment directories (exp*)
+  ├─ For each experiment:
+  │   └─ insertExperiment()
+  │       ├─ insertE3SMTiming() → Core metadata extraction
+  │       ├─ insertTiming() → Per-rank timing trees
+  │       ├─ insertMemoryFile() → Memory profiling data
+  │       ├─ insertScorpioStats() → I/O statistics
+  │       ├─ parseCaseDocs.loaddb_casedocs() → XML/namelist files
+  │       ├─ insertBuildTimeFile() → Build metrics
+  │       ├─ insertPreviewRunFile() → Job parameters
+  │       ├─ insertScripts() → Shell scripts
+  │       ├─ zipFolder() → Archive experiment
+  │       └─ db.session.commit()
+  └─ Cleanup staging area
+```
+
+### 4.2 Core Metadata Parser: `parseE3SMTiming.parseE3SMtiming()`
+
+**Location:** `portal/pace/e3sm/e3smParser/parseE3SMTiming.py:61-255`
+
+**Function Signature:**
+```python
+def parseE3SMtiming(filename: str) -> Tuple[bool, dict, list, list]:
+    """
+    Parse e3sm_timing.* file to extract experiment metadata.
+    
+    Args:
+        filename: Path to e3sm_timing.* file (plain or .gz)
+    
+    Returns:
+        Tuple of:
+        - successFlag (bool): True if parsing succeeded
+        - timingProfileInfo (dict): Experiment metadata (20+ fields)
+        - componentTable (list): PE layout configuration
+        - runTimeTable (list): Component timing breakdown
+    """
+```
+
+**Extracted Fields (20 fields):**
+```python
+timingProfileInfo = {
+    'case': str,              # Case name
+    'lid': str,               # Log ID (unique run identifier)
+    'machine': str,           # HPC system name
+    'caseroot': str,          # Case directory path
+    'timeroot': str,          # Timing directory path
+    'user': str,              # Username
+    'curr': str,              # Current date/time string
+    'long_res': str,          # Long grid resolution
+    'long_compset': str,      # Long component set
+    'stop_option': str,       # Stop criterion (e.g., 'ndays')
+    'stop_n': str,            # Stop value (e.g., '20')
+    'run_length': str,        # Run length in days
+    'total_pes': str,         # Total PEs active
+    'mpi_task': str,          # MPI tasks per node
+    'pe_count': str,          # PE count for cost estimate
+    'model_cost': str,        # Model cost (pe-hrs/simulated_year)
+    'model_throughput': str,  # Model throughput (simulated_years/day)
+    'actual_ocn': str,        # Actual ocean init wait time
+    'init_time': str,         # Initialization time (seconds)
+    'run_time': str,          # Run time (seconds)
+    'final_time': str         # Finalization time (seconds)
+}
+```
+
+**Component Table Structure:**
+```python
+# Extracted from e3sm_timing file's component layout table
+componentTable = [
+    component_name, comp_pes, root_pe, tasks, threads, instances, stride,
+    # Repeated for ~9 components (CPL, ATM, LND, ICE, OCN, ROF, GLC, WAV, ESP)
+]
+```
+
+**Runtime Table Structure:**
+```python
+# Extracted from e3sm_timing file's TOT Run Time table
+runTimeTable = [
+    component, seconds, model_day, model_years,
+    # Repeated for each component + communication component
+]
+```
+
+### 4.3 Resolution & Compset Parser: `parseReadMe.parseReadme()`
+
+**Location:** `portal/pace/e3sm/e3smParser/parseReadMe.py:19-74`
+
+**Function Signature:**
+```python
+def parseReadme(readmefilename: str) -> Union[dict, bool]:
+    """
+    Parse README.case.* file to extract resolution and compset.
+    
+    Args:
+        readmefilename: Path to README.case.* file (plain or .gz)
+    
+    Returns:
+        dict with 'res' and 'compset' keys, or False on error
+    """
+```
+
+**Extracted Fields:**
+```python
+{
+    'res': str,      # Grid resolution (short form, e.g., 'ne30_g16')
+    'compset': str,  # Component set (short form, e.g., 'F2010')
+    'name': str,     # Script name (create_newcase)
+    'date': str,     # Creation date
+    # Plus any other flags from create_newcase command line
+}
+```
+
+**Parsing Strategy:**
+- Searches for `create_newcase` command in README
+- Extracts command-line arguments: `--res`, `--compset`, etc.
+- Returns short-form resolution/compset (contrast with long-form in e3sm_timing)
+
+### 4.4 XML Configuration Parser: `parseCaseDocs.loaddb_casedocs()`
+
+**Location:** `portal/pace/e3sm/e3smParser/parseCaseDocs.py:85-156`
+
+**Function Signature:**
+```python
+def loaddb_casedocs(casedocpath: str, db: SQLAlchemy, currExpObj: E3SMexp) -> bool:
+    """
+    Parse XML, namelist, and RC files in CaseDocs directory.
+    
+    Args:
+        casedocpath: Path to CaseDocs.* directory
+        db: SQLAlchemy database session
+        currExpObj: Current experiment ORM object (for updating)
+    
+    Returns:
+        True on success
+        
+    Side Effects:
+        - Inserts into xml_inputs, namelist_inputs, rc_inputs tables
+        - Updates currExpObj.case_group (from env_case.xml)
+        - Updates currExpObj.compiler, currExpObj.mpilib (from env_build.xml)
+    """
+```
+
+**Recognized File Prefixes:**
+
+**Namelists** (29 types):
+```python
+namelists = (
+    "atm_in", "atm_modelio", "cpl_modelio", "drv_flds_in", "drv_in",
+    "esp_modelio", "glc_modelio", "ice_modelio", "lnd_in", "lnd_modelio",
+    "mosart_in", "mpaso_in", "mpassi_in", "ocn_modelio", "rof_modelio",
+    "user_nl_cam", "user_nl_clm", "user_nl_cpl", "user_nl_mosart",
+    "user_nl_mpascice", "user_nl_mpaso", "wav_modelio", "iac_modelio",
+    "docn_in", "user_nl_docn", "user_nl_cice", "ice_in",
+    "user_nl_elm", "user_nl_eam", "user_nl_mali", "mali_in"
+)
+```
+
+**XML Files** (9 types):
+```python
+xmlfiles = (
+    "env_archive", "env_batch", "env_build", "env_case",
+    "env_mach_pes", "env_mach_specific", "env_run", "env_workflow",
+    "namelist_scream"
+)
+```
+
+**RC Files** (1 type):
+```python
+rcfiles = ("seq_maps",)
+```
+
+**Key Metadata Extraction:**
+
+1. **From `env_case.xml`:**
+   - Extracts `CASE_GROUP` field
+   - Updates `currExpObj.case_group`
+
+2. **From `env_build.xml`:**
+   - Extracts `COMPILER` field → `currExpObj.compiler`
+   - Extracts `MPILIB` field → `currExpObj.mpilib`
+
+**Code Reference:**
+```python
+# portal/pace/e3sm/e3smParser/parseCaseDocs.py:121-129
+if nameseq[0] == 'env_case':
+    case_group = getCaseGroup(json.loads(data))
+    currExpObj.case_group = case_group
+    db.session.merge(currExpObj)
+elif nameseq[0] == 'env_build':
+    envBuildData = getEnvBuild(json.loads(data))
+    currExpObj.compiler = envBuildData['compiler']
+    currExpObj.mpilib = envBuildData['mpilib']
+    db.session.merge(currExpObj)
+```
+
+### 1.5 Model Timing Tree Parser: `parseModelTiming.parse()`
+
+**Location:** `portal/pace/e3sm/e3smParser/parseModelTiming.py`
+
+**Function Signature:**
+```python
+def parse(fileInput: TextIOWrapper) -> str:
+    """
+    Parse GPTL timing output to JSON tree structure.
+    
+    Args:
+        fileInput: Opened file handle to model_timing.* file
+    
+    Returns:
+        JSON string representing timing hierarchy
+    """
+```
+
+**Output Structure:**
+```json
+[
+  [
+    {
+      "name": "CPL:RUN_LOOP",
+      "multiParent": false,
+      "children": [...],
+      "values": {
+        "count": 240,
+        "wallmax": 1234.56,
+        "wallmin": 1234.50,
+        "walltotal": 296295.00,
+        "processes": 256,
+        "threads": 1,
+        "wallmax_proc": 0,
+        "wallmax_thrd": 0,
+        "wallmin_proc": 255,
+        "wallmin_thrd": 0,
+        "on": true
+      }
+    }
+  ]
+]
+```
+
+### 1.6 Summary: Entrypoint Contract
+
+**For SimBoard Integration:**
+
+To parse E3SM data **without** PACE's REST layer, SimBoard needs:
+
+1. **Filesystem Layout** (see Section 2):
+   - Experiment directory with specific files
+   - CaseDocs subdirectory with XML/namelist files
+
+2. **Required Functions**:
+   ```python
+   from pace.e3sm.e3smParser import parseE3SMTiming, parseReadMe, parseCaseDocs
+   from pace.e3sm.e3smParser import parseModelTiming, parseMemoryProfile, parseScorpioStats
+   
+   # Core metadata
+   success, metadata, pe_layout, runtime = parseE3SMTiming.parseE3SMtiming(e3sm_timing_file)
+   readme_data = parseReadMe.parseReadme(readme_file)
+   
+   # Timing trees
+   for rank_file in timing_tarball:
+       timing_json = parseModelTiming.parse(rank_file)
+   
+   # Configuration
+   parseCaseDocs.loaddb_casedocs(casedocs_dir, db, exp_obj)
+   ```
+
+3. **No REST Layer Required**:
+   - Parsers are pure functions (mostly)
+   - Input: File paths
+   - Output: Dictionaries, lists, JSON strings
+   - Side effects: Only database writes (can be abstracted)
+
+---
+
+## 2. Required Filesystem Layout
+
+This section documents the expected filesystem structure that E3SM parsers require. Understanding this is crucial for:
+1. Validating uploaded experiments before parsing
+2. Implementing parsers in SimBoard without PACE's specific directory structure
+3. Identifying which files are optional vs. required
+
+### 5.1 Upload Archive Structure
+
+**Expected Zip Format:**
+```
+pace-exps-{user}-{timestamp}.zip
+└── pace-exps-{user}-{timestamp}/
+    ├── exp0/
+    │   ├── e3sm_timing.{LID}[.gz]              [REQUIRED]
+    │   ├── timing.{LID}.tar.gz                  [REQUIRED]
+    │   ├── README.case.{LID}[.gz]               [REQUIRED]
+    │   ├── GIT_DESCRIBE.{LID}[.gz]              [REQUIRED]
+    │   ├── CaseDocs.{LID}/                      [REQUIRED]
+    │   │   ├── env_case.xml.gz                  [Required for case_group]
+    │   │   ├── env_build.xml.gz                 [Required for compiler/mpilib]
+    │   │   ├── env_run.xml.gz
+    │   │   ├── env_mach_pes.xml.gz
+    │   │   ├── atm_in.*.gz                      [Component namelists]
+    │   │   ├── lnd_in.*.gz
+    │   │   ├── ocn_in.*.gz
+    │   │   ├── user_nl_*.*.gz                   [User modifications]
+    │   │   └── seq_maps.rc.*.gz                 [Mapping files]
+    │   ├── spio_stats.{LID}[.gz]                [OPTIONAL]
+    │   ├── memory.{LID}[.gz]                    [OPTIONAL]
+    │   ├── build_times.txt.{LID}[.gz]           [OPTIONAL]
+    │   ├── preview_run.log.{LID}[.gz]           [OPTIONAL]
+    │   ├── replay.sh.{LID}[.gz]                 [OPTIONAL]
+    │   └── run_e3sm.sh.{LID}[.gz]               [OPTIONAL]
+    ├── exp1/
+    │   └── ... (same structure)
+    └── expN/
+        └── ... (same structure)
+```
+
+**Key Observations:**
+
+1. **{LID}** = Log ID, unique identifier for this run (format: `YYYYMMDD-HHMMSS`)
+   - Example: `43235257.210608-222102`
+
+2. **File Naming Convention:**
+   - Base name + `.` + LID + optional `.gz` extension
+   - Examples:
+     - `e3sm_timing.43235257.210608-222102.gz`
+     - `timing.43235257.210608-222102.tar.gz`
+     - `README.case.43235257.210608-222102`
+
+3. **Compression:**
+   - Most files are gzip-compressed (`.gz`)
+   - Timing files are tar.gz archives
+   - Parsers handle both compressed and uncompressed
+
+### 5.2 Required Files (Minimum for Successful Parse)
+
+**Core Metadata Files:**
+
+1. **`e3sm_timing.{LID}[.gz]`**
+   - **Purpose:** Primary metadata source
+   - **Contains:** Case name, machine, user, PE layout, timing summary, component tables
+   - **Fields Extracted:** 20+ fields (see Section 1.2)
+   - **Parser:** `parseE3SMTiming.parseE3SMtiming()`
+   - **Failure Impact:** Parse fails immediately
+
+2. **`timing.{LID}.tar.gz`**
+   - **Purpose:** Per-rank detailed timing trees
+   - **Contains:** Tarball with `model_timing.0000`, `model_timing.0001`, ..., `model_timing_stats`
+   - **Parser:** `parseModelTiming.parse()`
+   - **Failure Impact:** Parse fails immediately
+
+3. **`README.case.{LID}[.gz]`**
+   - **Purpose:** Resolution and compset (short forms)
+   - **Contains:** create_newcase command with `--res` and `--compset` flags
+   - **Fields Extracted:** `res`, `compset`
+   - **Parser:** `parseReadMe.parseReadme()`
+   - **Failure Impact:** Parse fails immediately
+
+4. **`GIT_DESCRIBE.{LID}[.gz]`**
+   - **Purpose:** E3SM version information
+   - **Contains:** Git describe output (e.g., `v2.1.0-123-g4a5b6c7`)
+   - **Parser:** `parseModelVersion.parseModelVersion()`
+   - **Failure Impact:** Parse fails immediately
+
+5. **`CaseDocs.{LID}/`**
+   - **Purpose:** XML configurations and namelists
+   - **Required Subfiles:**
+     - `env_case.xml.gz` (for case_group)
+     - `env_build.xml.gz` (for compiler/mpilib)
+   - **Parser:** `parseCaseDocs.loaddb_casedocs()`
+   - **Failure Impact:** Parse succeeds but misses case_group/compiler/mpilib
+
+### 5.3 Optional Files (Enhance Data but Not Required)
+
+**Performance and Configuration Files:**
+
+1. **`spio_stats.{LID}[.gz]`**
+   - **Purpose:** SCORPIO I/O statistics
+   - **Contains:** JSON with per-file I/O metrics
+   - **Parser:** `parseScorpioStats.loaddb_scorpio_stats()`
+   - **Failure Impact:** None (skipped if missing)
+
+2. **`memory.{LID}[.gz]`**
+   - **Purpose:** Memory profiling data
+   - **Contains:** CSV with memory usage over time
+   - **Parser:** `parseMemoryProfile.loaddb_memfile()`
+   - **Failure Impact:** None (skipped if missing)
+
+3. **`build_times.txt.{LID}[.gz]`**
+   - **Purpose:** Build/compilation timing
+   - **Contains:** Text file with per-component build times
+   - **Parser:** `parseBuildTime.loaddb_buildTimesFile()`
+   - **Failure Impact:** None (skipped if missing)
+
+4. **`preview_run.log.{LID}[.gz]`**
+   - **Purpose:** Job submission parameters
+   - **Contains:** Preview run output with node count, tasks, threads, etc.
+   - **Parser:** `parsePreviewRun.load_previewRunFile()`
+   - **Failure Impact:** None (skipped if missing)
+
+5. **`replay.sh.{LID}[.gz]`** and **`run_e3sm.sh.{LID}[.gz]`**
+   - **Purpose:** Shell scripts for reproduction
+   - **Contains:** Bash scripts
+   - **Parser:** `parseReplaysh.load_replayshFile()`, `parseRunE3SMsh.load_rune3smshfile()`
+   - **Failure Impact:** None (skipped if missing)
+
+### 5.4 Discovery Logic
+
+**Code Reference:** `portal/pace/e3sm/e3smParser/parseE3SM.py:98-139`
+
+```python
+# Discover experiment directories
+experimentDirs = []
+for dir in os.listdir(os.path.join(fpath, tmpfilename)):
+    if dir.startswith('exp'):
+        experimentDirs.append(os.path.join(fpath, tmpfilename, dir))
+
+# For each experiment, collect file paths
+experimentFiles = []
+for root in experimentDirs:
+    model = {
+        "timingfile": None,      # timing.*
+        "allfile": None,         # e3sm_timing.*
+        "readmefile": None,      # README.case.*
+        "gitdescribefile": None, # GIT_DESCRIBE.*
+        "scorpiofile": None,     # spio_stats.*
+        "memoryfile": None,      # memory.*
+        "casedocs": None,        # CaseDocs.*/ (directory)
+        "buildtimefile": None,   # build_times.txt.*
+        "previewrunfile": None,  # preview_run.log.*
+        "replayshfile": None,    # replay.sh.*
+        "run_e3sm_file": None    # run_e3sm.sh.*
+    }
+    
+    # Walk directory tree to find files
+    for path, subdirs, files in os.walk(root):
+        for name in files:
+            if name.startswith("timing."):
+                model['timingfile'] = os.path.join(path, name)
+            elif name.startswith("e3sm_timing."):
+                model['allfile'] = os.path.join(path, name)
+            # ... etc for all file types
+        for name in subdirs:
+            if name.startswith("CaseDocs."):
+                model['casedocs'] = os.path.join(path, name)
+    
+    experimentFiles.append(model)
+```
+
+**Discovery Strategy:**
+1. Experiments must be in directories starting with `exp`
+2. Files are discovered via filename prefix matching (not extension)
+3. `CaseDocs` is discovered as a subdirectory
+4. Missing optional files result in `None` values (gracefully handled)
+
+### 5.5 SimBoard Implications
+
+**For SimBoard to Parse E3SM Data:**
+
+1. **Accept Flexible Layouts:**
+   - Don't require exact PACE directory structure
+   - Use file manifest or metadata file instead of filename scanning
+   - Allow users to specify file roles explicitly
+
+2. **Validate Before Parsing:**
+   ```python
+   def validate_e3sm_experiment(exp_dir):
+       required = [
+           'e3sm_timing.*',
+           'timing.*.tar.gz',
+           'README.case.*',
+           'GIT_DESCRIBE.*',
+           'CaseDocs.*/'
+       ]
+       for pattern in required:
+           if not glob.glob(os.path.join(exp_dir, pattern)):
+               raise ValidationError(f"Missing required file: {pattern}")
+   ```
+
+3. **Support Partial Ingestion:**
+   - Parse core metadata even if optional files missing
+   - Mark fields as "unavailable" rather than failing entire parse
+
+---
+
+## 3. Field-Level Metadata Derivation
+
+This section provides a comprehensive mapping of **where each metadata field comes from**. This is critical for:
+1. Understanding data provenance
+2. Implementing parsers without PACE's database schema
+3. Validating data quality and completeness
+
+### 3.1 E3SMexp Table Fields (Primary Metadata)
+
+**Database Table:** `e3smexp`  
+**ORM Class:** `E3SMexp` in `portal/pace/e3sm/e3smDb/datastructs.py`
+
+| Field | Source File | Source Parser | Extraction Logic | Required |
+|-------|-------------|---------------|------------------|----------|
+| `expid` | Database | Auto-increment | Generated by database | ✓ |
+| `case` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "Case :" | ✓ |
+| `lid` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "LID :" | ✓ |
+| `machine` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "Machine :" | ✓ |
+| `caseroot` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "Caseroot :" | ✓ |
+| `timeroot` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "Timeroot :" | ✓ |
+| `user` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "User :" | ✓ |
+| `exp_date` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "Curr :", converted via `changeDateTime()` | ✓ |
+| `long_res` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "grid :" (long form) | ✓ |
+| `res` | `README.case.*` | `parseReadMe` | `--res` flag from create_newcase command (short form) | ✓ |
+| `compset` | `README.case.*` | `parseReadMe` | `--compset` flag from create_newcase command (short form) | ✓ |
+| `long_compset` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "compset :" (long form) | ✓ |
+| `stop_option` | `e3sm_timing.*` | `parseE3SMTiming` | From "stop option" line, first part before comma | ✓ |
+| `stop_n` | `e3sm_timing.*` | `parseE3SMTiming` | From "stop option" line, after "stop_n =" | ✓ |
+| `run_length` | `e3sm_timing.*` | `parseE3SMTiming` | From "run length :" line, numeric part | ✓ |
+| `total_pes_active` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "total :", after colon | ✓ |
+| `mpi_tasks_per_node` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "mpi :", after colon | ✓ |
+| `pe_count_for_cost_estimate` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "pe :", after colon | ✓ |
+| `model_cost` | `e3sm_timing.*` | `parseE3SMTiming` | First "Model :" line value (pe-hrs/simulated_year) | ✓ |
+| `model_throughput` | `e3sm_timing.*` | `parseE3SMTiming` | Second "Model :" line value (simulated_years/day) | ✓ |
+| `actual_ocn_init_wait_time` | `e3sm_timing.*` | `parseE3SMTiming` | Line starting with "Actual :" | ✓ |
+| `init_time` | `e3sm_timing.*` | `parseE3SMTiming` | First "Init :" line value (seconds) | ✓ |
+| `run_time` | `e3sm_timing.*` | `parseE3SMTiming` | First "Run :" line value (seconds) | ✓ |
+| `final_time` | `e3sm_timing.*` | `parseE3SMTiming` | First "Final :" line value (seconds) | ✓ |
+| `version` | `GIT_DESCRIBE.*` | `parseModelVersion` | Git describe output (e.g., "v2.1.0-123-g4a5b6c7") | ✓ |
+| `upload_by` | REST API | Function argument | Passed from `/fileparse` endpoint | ✓ |
+| `case_group` | `env_case.xml` | `parseCaseDocs` | From `<entry id="CASE_GROUP">` in env_case.xml | ○ |
+| `compiler` | `env_build.xml` | `parseCaseDocs` | From `<entry id="COMPILER">` in env_build.xml | ○ |
+| `mpilib` | `env_build.xml` | `parseCaseDocs` | From `<entry id="MPILIB">` in env_build.xml | ○ |
+
+**Legend:**
+- ✓ Required for successful parse
+- ○ Optional (filled if files available)
+
+**Code Reference for XML Fields:**
+```python
+# portal/pace/e3sm/e3smParser/parseCaseDocs.py:41-78
+
+# Extract case_group from env_case.xml
+def getCaseGroup(jsondata):
+    caseDir = jsondata["file"]["group"]
+    for model in caseDir:
+        if model.get('@id') == 'case_desc' and 'entry' in model:
+            for entry in model['entry']:
+                if entry.get('@id') == 'CASE_GROUP':
+                    return entry.get('@value')
+    return None
+
+# Extract compiler and mpilib from env_build.xml
+def getEnvBuild(jsondata):
+    output = {'compiler': None, 'mpilib': None}
+    buildModel = jsondata["file"]["group"]
+    for model in buildModel:
+        if model.get('@id') == 'build_macros' and 'entry' in model:
+            for entry in model['entry']:
+                if entry.get('@id') == 'COMPILER':
+                    output['compiler'] = entry.get('@value')
+                elif entry.get('@id') == 'MPILIB':
+                    output['mpilib'] = entry.get('@value')
+    return output
+```
+
+### 3.2 Resolution and Compset: Long vs. Short Forms
+
+**Important Distinction:**
+
+E3SM uses two forms for resolution and compset:
+1. **Short Form** (user-friendly): Extracted from `README.case.*`
+2. **Long Form** (fully expanded): Extracted from `e3sm_timing.*`
+
+**Example:**
+
+| Field | Short Form (README) | Long Form (e3sm_timing) |
+|-------|---------------------|-------------------------|
+| Resolution | `ne30_g16` | `a%ne30np4_l%null_oi%gx1v7_r%r05_g%null_w%null_m%gx1v7` |
+| Compset | `F2010` | `2010_CAM60_CLM50%SP_CICE_POP2%ECO%ABIO-DIC_MOSART_SGLC_SWAV` |
+
+**Why Both?**
+- **Short form:** Easy for humans to read, used in UI and queries
+- **Long form:** Unambiguous, specifies exact component configurations
+
+**SimBoard Recommendation:**
+Store both forms in separate fields for flexibility.
+
+### 9.3 Component Layout (pelayout Table)
+
+**Database Table:** `pelayout`  
+**Source File:** `e3sm_timing.*`  
+**Parser:** `parseE3SMTiming.parseE3SMtiming()`  
+**Extraction:** Component table section of e3sm_timing file
+
+**Fields Extracted Per Component:**
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `expid` | Foreign key to e3smexp | 12345 |
+| `component` | Component name | CPL, ATM, LND, ICE, OCN, ROF, GLC, WAV, ESP |
+| `comp_pes` | Component PEs | 256 |
+| `root_pe` | Root PE number | 0 |
+| `tasks` | Number of tasks | 256 |
+| `threads` | Threads per task | 1 |
+| `instances` | Number of instances | 1 |
+| `stride` | Stride value | 1 |
+
+**Code Reference:**
+```python
+# portal/pace/e3sm/e3smParser/parseE3SMTiming.py:214-216
+if firstWord == 'component':
+    for j in range(9):
+        tablelist.append(lines[i+j+2])  # Skip header rows
+    componentTableSuccess = True
+```
+
+### 3.4 Component Runtime (runtime Table)
+
+**Database Table:** `runtime`  
+**Source File:** `e3sm_timing.*`  
+**Parser:** `parseE3SMTiming.parseE3SMtiming()`  
+**Extraction:** TOT Run Time table section
+
+**Fields Extracted Per Component:**
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `expid` | Foreign key to e3smexp | 12345 |
+| `component` | Component name (may include _COMM for communication) | CPL, ATM, LND_COMM, ICE |
+| `seconds` | Wall clock time (seconds) | 1234.56 |
+| `model_day` | Seconds per model day | 0.05 |
+| `model_years` | Seconds per model year | 18.25 |
+
+**Code Reference:**
+```python
+# portal/pace/e3sm/e3smParser/parseE3SMTiming.py:219-228
+elif firstWord == 'TOT':
+    for j in range(11):  # 11 components
+        component = lines[i+j].split()
+        if component[1] == 'Run':
+            runTimeTable.append(component[0])
+        else:
+            runTimeTable.append(str(component[0]) + '_COMM')
+        runTimeTable.append(component[3])  # seconds
+        runTimeTable.append(component[5])  # model_day
+        runTimeTable.append(component[7])  # model_years
+```
+
+### 3.5 Model Timing Trees (model_timing Table)
+
+**Database Table:** `model_timing`  
+**Source File:** `timing.*.tar.gz` (contains `model_timing.0000`, `model_timing.0001`, ..., `model_timing_stats`)  
+**Parser:** `parseModelTiming.parse()`  
+**Format:** JSON tree structure
+
+**Fields Per Entry:**
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `expid` | Foreign key to e3smexp | 12345 |
+| `rank` | MPI rank number or "stats" | "0", "1", ..., "255", "stats" |
+| `jsonVal` | JSON tree of timing data | (see Section 1.5) |
+
+**JSON Structure:**
+```json
+{
+  "name": "CPL:RUN_LOOP",
+  "values": {
+    "count": 240,
+    "wallmax": 1234.56,
+    "wallmin": 1234.50,
+    "walltotal": 296295.00,
+    "processes": 256,
+    "threads": 1
+  },
+  "children": [...]
+}
+```
+
+### 3.6 Configuration Files
+
+**XML Inputs (xml_inputs Table):**
+- **Source:** `CaseDocs.{LID}/*.xml.gz`
+- **Parser:** `parseXML.loaddb_xmlfile()`
+- **Format:** XML → JSON via xmltodict
+- **Key Files:**
+  - `env_case.xml`: Case configuration
+  - `env_build.xml`: Build/compiler settings
+  - `env_run.xml`: Runtime parameters
+  - `env_mach_pes.xml`: PE layout details
+
+**Namelist Inputs (namelist_inputs Table):**
+- **Source:** `CaseDocs.{LID}/*_in.*.gz`, `CaseDocs.{LID}/user_nl_*.*.gz`
+- **Parser:** `parseNameList.loaddb_namelist()` or `parseText.load_text()` (for user_nl)
+- **Format:** Fortran namelist → JSON
+- **Key Files:**
+  - `atm_in.*`: Atmosphere namelists
+  - `lnd_in.*`: Land namelists
+  - `ocn_in.*`: Ocean namelists
+  - `user_nl_*`: User modifications
+
+**RC Inputs (rc_inputs Table):**
+- **Source:** `CaseDocs.{LID}/seq_maps.rc.*.gz`
+- **Parser:** `parseRC.loaddb_rcfile()`
+- **Format:** RC file → JSON
+
+### 3.7 Optional Performance Data
+
+**SCORPIO I/O Stats (scorpio_stats Table):**
+- **Source:** `spio_stats.{LID}[.gz]`
+- **Parser:** `parseScorpioStats.loaddb_scorpio_stats()`
+- **Fields:**
+  - `expid`, `name`, `data` (JSON), `iopercent`, `iotime`, `version`
+
+**Memory Profile (memfile_inputs Table):**
+- **Source:** `memory.{LID}[.gz]`
+- **Parser:** `parseMemoryProfile.loaddb_memfile()`
+- **Fields:**
+  - `expid`, `name` ("memory"), `data` (CSV string)
+
+**Build Time (build_time Table):**
+- **Source:** `build_times.txt.{LID}[.gz]`
+- **Parser:** `parseBuildTime.loaddb_buildTimesFile()`
+- **Fields:**
+  - `expid`, `data` (JSON), `total_computecost`, `total_elapsed_time`
+
+**Preview Run (preview_run Table):**
+- **Source:** `preview_run.log.{LID}[.gz]`
+- **Parser:** `parsePreviewRun.load_previewRunFile()`
+- **Fields:**
+  - `expid`, `nodes`, `total_tasks`, `tasks_per_node`, `thread_count`, `ngpus_per_node`, `mpirun`, `submit_cmd`, `env` (JSON), `omp_threads`
+
+**Scripts (script_files Table):**
+- **Source:** `replay.sh.{LID}[.gz]`, `run_e3sm.sh.{LID}[.gz]`
+- **Parser:** `parseReplaysh.load_replayshFile()`, `parseRunE3SMsh.load_rune3smshfile()`
+- **Fields:**
+  - `expid`, `name` ("replay_sh" or "run_e3sm_sh"), `data` (bash script text)
+
+### 3.8 Metadata Derivation Summary
+
+**Key Takeaways for SimBoard:**
+
+1. **Primary Source: `e3sm_timing.*`**
+   - Contains 20+ core metadata fields
+   - Text-based format (easy to parse)
+   - Single source of truth for most experiment metadata
+
+2. **Secondary Source: `README.case.*`**
+   - Provides short-form resolution and compset
+   - Contains create_newcase command-line arguments
+   - Essential for user-friendly display
+
+3. **Tertiary Sources: XML Files**
+   - Provide additional context (case_group, compiler, mpilib)
+   - Not required for basic ingestion
+   - Enable advanced filtering and analysis
+
+4. **Derivation is Deterministic:**
+   - No complex inference or heuristics
+   - Each field has a single, well-defined source
+   - Parsing is straightforward text extraction
+
+5. **SimBoard Can Reuse Parsers:**
+   - PACE parsers are mostly pure functions
+   - Input: File path
+   - Output: Dictionary or JSON
+   - Minimal PACE-specific dependencies
+
+---
+
+## 4. REST Call Flow
+
+### 4.1 Upload Flow (`/upload`)
 
 **Location:** `portal/pace/webapp.py` lines 96-115
 
@@ -77,7 +893,7 @@ def upload_file():
             return('complete')
 ```
 
-### 1.2 Parse Flow (`/fileparse`)
+### 4.2 Parse Flow (`/fileparse`)
 
 **Location:** `portal/pace/webapp.py` lines 117-131
 
@@ -114,7 +930,7 @@ def fileparse():
         return(parse.parseData(filename,user,project))
 ```
 
-### 1.3 Parser Orchestration Flow
+### 4.3 Parser Orchestration Flow
 
 **Location:** `portal/pace/parse.py` lines 21-47
 
@@ -158,7 +974,7 @@ def parseData(zipfilename,uploaduser,project):
     return(status+'/'+str(logfilename))
 ```
 
-### 1.4 E3SM Parser Flow
+### 4.4 E3SM Parser Flow
 
 **Location:** `portal/pace/e3sm/e3smParser/parseE3SM.py` lines 65-184
 
@@ -276,9 +1092,9 @@ def parseData(zipfilename,uploaduser):
 
 ---
 
-## 2. Data Handoff Points
+## 5. Data Handoff Points
 
-### 2.1 Client → REST Layer
+### 5.1 Client → REST Layer
 
 **Handoff:** HTTP multipart form data
 
@@ -297,7 +1113,7 @@ def parseData(zipfilename,uploaduser):
 - Client has already authenticated via GitHub OAuth (via pace-upload tool)
 - Filename embeds user identity for validation
 
-### 2.2 REST Layer → Filesystem
+### 5.2 REST Layer → Filesystem
 
 **Handoff:** File I/O operations
 
@@ -327,7 +1143,7 @@ def getDirectories():
 - Internal logs: `{PACE_LOG_DIR}/internal-pace-{user}-{timestamp}.log`
 - Archived experiments: `{EXP_DIR}/exp-{user}-{expid}.zip`
 
-### 2.3 Filesystem → Parser Layer
+### 5.3 Filesystem → Parser Layer
 
 **Handoff:** File paths passed to parser functions
 
@@ -359,7 +1175,7 @@ parseReplaysh.load_replayshFile(replay_sh)        # → string
 parseRunE3SMsh.load_rune3smshfile(run_e3sm)       # → string
 ```
 
-### 2.4 Parser Layer → Database
+### 5.4 Parser Layer → Database
 
 **Handoff:** SQLAlchemy ORM objects
 
@@ -390,7 +1206,7 @@ except SQLAlchemyError:
     return False
 ```
 
-### 2.5 Database → Response
+### 5.5 Database → Response
 
 **Handoff:** HTTP response string
 
@@ -413,7 +1229,7 @@ else:
 
 ---
 
-## 3. Control Decisions
+## 6. Control Decisions
 
 ### 3.1 Validation Gates
 
@@ -535,7 +1351,7 @@ except Exception as e:
 - Uploaded files removed after parsing (success or fail)
 - Cleanup occurs in `removeFolder()` at end of parseData()
 
-### 3.3 Sync vs Async Execution
+### 9.3 Sync vs Async Execution
 
 **Synchronous (Blocking) Flow:**
 - All REST handlers execute synchronously
@@ -569,9 +1385,9 @@ return(parse.parseData(filename,user,project))
 
 ---
 
-## 4. Side Effects
+## 7. Side Effects
 
-### 4.1 Filesystem Writes
+### 7.1 Filesystem Writes
 
 #### During Upload (`/upload`)
 **Location:** `portal/pace/webapp.py:96-115`
@@ -642,7 +1458,7 @@ return(parse.parseData(filename,user,project))
 - Tarfile extraction uses `safemembers()` to prevent path traversal attacks (lines 39-59)
 - Filenames sanitized via `secure_filename()` in upload handler
 
-### 4.2 Logging
+### 7.2 Logging
 
 **Log Redirection:**
 ```python
@@ -687,7 +1503,7 @@ sys.stderr = intlog_file
 - Client downloads log via `/downloadlog` endpoint
 - Logs persist on server for debugging
 
-### 4.3 Persistence (Database)
+### 7.3 Persistence (Database)
 
 **Database Connection:**
 ```python
@@ -725,7 +1541,7 @@ def initDatabase():
 - Duplicate detection prevents insertion, returns early
 - No database writes for duplicates
 
-### 4.4 External Service Interactions
+### 7.4 External Service Interactions
 
 **Minio Object Storage:**
 **Location:** `portal/pace/e3sm/e3smParser/parseE3SM.py:617-632`
@@ -764,9 +1580,9 @@ minio_url = <url>
 
 ---
 
-## 5. Transferable Patterns
+## 8. Transferable Patterns
 
-### 5.1 Generally Reusable Patterns
+### 8.1 Generally Reusable Patterns
 
 #### Pattern 1: Two-Stage Ingestion
 **Concept:** Separate upload from parsing
@@ -870,7 +1686,7 @@ if existing:
 - ✅ Essential for automated/cron-driven systems
 - ✅ Highly reusable pattern
 
-### 5.2 PACE-Specific Patterns (Less Transferable)
+### 8.2 PACE-Specific Patterns (Less Transferable)
 
 #### Pattern 1: Synchronous REST Parsing
 **Issue:** Parsing happens in HTTP request handler
@@ -969,9 +1785,9 @@ elif name.startswith("e3sm_timing."):
 
 ---
 
-## 6. SimBoard Relevance
+## 9. SimBoard Relevance
 
-### 6.1 How This Flow Could Be Mimicked
+### 9.1 How This Flow Could Be Mimicked
 
 SimBoard already has REST APIs (built with FastAPI). Here's how to adapt PACE's patterns:
 
@@ -1068,7 +1884,7 @@ async def get_parse_log(job_id: str, level: str = "INFO"):
     }
 ```
 
-### 6.2 Patterns Worth Adopting
+### 9.2 Patterns Worth Adopting
 
 #### ✅ 1. Duplicate Detection
 **Why:** Prevents duplicate ingestion from automation
@@ -1146,7 +1962,7 @@ async def cleanup_staging_area():
             file.unlink()
 ```
 
-### 6.3 Patterns to Avoid
+### 9.3 Patterns to Avoid
 
 #### ❌ 1. Synchronous REST Parsing
 **Why:** Blocks HTTP workers, poor scalability
@@ -1173,7 +1989,7 @@ async def cleanup_staging_area():
 
 **Alternative:** Context-aware logging with correlation IDs
 
-### 6.4 High-Level SimBoard Adaptation
+### 9.4 High-Level SimBoard Adaptation
 
 **Recommended Architecture:**
 
@@ -1234,7 +2050,7 @@ async def cleanup_staging_area():
 5. **Plugin architecture** (extensible parsers)
 6. **API key auth** (not GitHub OAuth)
 
-### 6.5 Specific Recommendations
+### 9.5 Specific Recommendations
 
 #### For Cron-Driven Ingestion:
 1. ✅ Keep two-stage upload/parse flow
