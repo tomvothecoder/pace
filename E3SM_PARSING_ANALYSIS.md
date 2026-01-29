@@ -77,6 +77,7 @@ flowchart TD
 - `e3sm_timing.*` - Main timing summary (REQUIRED)
 - `README.case.*` - Case creation metadata (REQUIRED)
 - `GIT_DESCRIBE.*` - E3SM version info (REQUIRED)
+- `GIT_CONFIG.*` and `GIT_STATUS.*` - Git info (OPTIONAL)
 - `CaseDocs.*/env_case.xml.*` - Case group (OPTIONAL)
 - `CaseDocs.*/env_build.xml.*` - Compiler info (OPTIONAL)
 - `replay.sh.*`, `run_e3sm.sh.*` - Scripts (OPTIONAL)
@@ -163,6 +164,8 @@ Expected file patterns:
 - `CaseDocs.*/env_build.xml.*` - Build configuration (for compiler)
 
 **Optional Files (enhance SimBoard metadata if available):**
+- `GIT_CONFIG.*` - Git configuration, including url and branch information
+- `GIT_STATUS.*` - The current git branch checked out
 - `replay.sh.*` - Replay script (can be stored as artifact)
 - `run_e3sm.sh.*` - Run script (can be stored as artifact)
 - Other CaseDocs XML/namelist files (for extra metadata)
@@ -206,6 +209,8 @@ upload_folder/
 | GIT_DESCRIBE | Text | .gz | parseModelVersion.py | Git version info |
 | env_case.xml | XML | .gz | parseXML.py | Group name |
 | env_build.xml | XML | .gz | parseXML.py | Compiler info |
+| GIT_CONFIG | Text | .gz | N/A | Git url and branch info |
+| GIT_STATUS | Text | .gz | N/A | Git current branch checked out |
 | replay.sh | Bash script | .gz | parseReplaysh.py | Artifact storage |
 | run_e3sm.sh | Bash script | .gz | parseRunE3SMsh.py | Artifact storage |
 
@@ -224,7 +229,7 @@ upload_folder/
 | lid | `LID:` | `extra.lid` | Local ID (timestamp) |
 | machine | `Machine:` | `machine_id` (via lookup) | HPC machine name |
 | user | `User:` | `extra.user` | Username who ran simulation |
-| curr | `Curr Date:` | `simulation_start_date` | Current date/time of run |
+| curr | `Curr Date:` | `run_start_date` | Current date/time of run |
 | long_res | `grid:` | `grid_resolution` | Full grid specification |
 | long_compset | `compset:` | `compset_alias` | Full component set |
 | stop_option | `stop option:` | `extra.stop_option` | Stop criterion (e.g., "ndays") |
@@ -299,13 +304,11 @@ upload_folder/
 5. Find entry with `@id='CASE_GROUP'`
 6. Extract `@value`
 
-#### B. env_build.xml - Compiler Info
-
-**Parser:** `parseXML.loaddb_xmlfile(xmlpath)` + `getEnvBuild(jsondata)`
+### 3.5 CaseStatus
 
 **SimBoard-Relevant Fields:**
-- `compiler` from `COMPILER` entry → SimBoard `compiler`
-- `mpilib` from `MPILIB` entry → SimBoard `extra.mpilib`
+- `run_start_date` from `RUN_STARTDATE` entry
+- `run_end_date` from `RUN_STARTDATE` entry stop option and stop_n (either from e3smTiming or CaseStatus file)
 
 **Parsing Logic:**
 1. Unzip and parse XML to JSON
@@ -313,7 +316,13 @@ upload_folder/
 3. Find group with `@id='build_macros'`
 4. Extract `COMPILER` and `MPILIB` entry values
 
-### 3.5 Script Files (Optional Artifacts)
+### 3.7 Git Information (from GIT_CONFIG.* and GIT_STATUS.*)
+
+**SimBoard-Relevant Field:**
+- git_url: from [remote "origin"] in GIT_CONFIG.*
+- git_branch: from last entry in GIT_STATUS.*
+
+### 3.6 Script Files (Optional Artifacts)
 
 **Source:** `parseReplaysh.load_replayshFile()`, `parseRunE3SMsh.load_rune3smshfile()`  
 **Files:** `portal/pace/e3sm/e3smParser/parseReplaysh.py`, `parseRunE3SMsh.py`
@@ -355,7 +364,12 @@ For SimBoard ingestion, only these parsing steps are required:
 - Extracts: compiler, mpilib
 - **Required:** NO - Gracefully skipped if missing
 
-**Step 6: (Optional) Store replay.sh and run_e3sm.sh as artifacts**
+**Step 6: Parse GIT_CONFIG and GIT_STATUS files**
+- Function: N/A
+- Extracts: git_url, git_branch
+- **Required:** NO - Gracefully skipped if missing
+
+**Step 7: (Optional) Store replay.sh and run_e3sm.sh as artifacts**
 - Function: `parseReplaysh.load_replayshFile()`, `parseRunE3SMsh.load_rune3smshfile()`
 - Stores: Script content for artifact storage
 - **Required:** NO - Gracefully skipped if missing
@@ -592,15 +606,15 @@ Fields that PACE can directly populate in SimBoard's `SimulationCreate` schema:
 | `initialization_type` | e3sm_timing | `run_type` | From "run type" line |
 | `group_name` | env_case.xml | `case_group` | From CASE_GROUP entry |
 | **Model timeline** | | | |
-| `machine_id` | N/A | - | PACE has machine name, not UUID |
+| `machine_id` | e3sm_timing | - | PACE has machine name, not UUID |
 | `simulation_start_date` | e3sm_timing | `exp_date` | From "Curr Date" |
 | `simulation_end_date` | N/A | - | Not explicitly tracked |
-| `run_start_date` | N/A | - | Not explicitly tracked |
-| `run_end_date` | N/A | - | Not explicitly tracked |
+| `run_start_date` | caseStatus | - | Not explicitly tracked |
+| `run_end_date` | caseStatus | - | Not explicitly tracked |
 | `compiler` | env_build.xml | `compiler` | From COMPILER entry |
 | **Version control** | | | |
-| `git_repository_url` | N/A | - | Not tracked by PACE |
-| `git_branch` | N/A | - | Not tracked by PACE |
+| `git_repository_url` | GIT_CONFIG | - | |
+| `git_branch` | GIT_CONFIG | - | |
 | `git_tag` | GIT_DESCRIBE | `version` | Git describe string |
 | `git_commit_hash` | GIT_DESCRIBE | `version` | Extract hash from git describe |
 | **Provenance** | | | |
@@ -704,12 +718,7 @@ SimBoard fields that PACE cannot populate (require external data or manual input
 | `campaign_id` | Campaign tracking not in PACE |
 | `experiment_type_id` | Experiment type taxonomy not in PACE |
 | `parent_simulation_id` | Parent-child relationships not tracked |
-| `machine_id` | PACE has machine name string, not UUID reference |
 | `simulation_end_date` | Only experiment date available |
-| `run_start_date` | Not explicitly tracked |
-| `run_end_date` | Not explicitly tracked |
-| `git_repository_url` | Repository URL not stored |
-| `git_branch` | Branch name not stored |
 | `key_features` | Free-text field, not in PACE |
 | `known_issues` | Free-text field, not in PACE |
 | `notes_markdown` | Free-text field, not in PACE |
