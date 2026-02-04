@@ -224,44 +224,108 @@ PACE uses `(user, machine, date, case)`.
 
 Fields that PACE can directly populate in SimBoard’s `SimulationCreate` schema:
 
-| SimBoard Field            | PACE Source   | PACE Field/File   | Notes                           |
-| ------------------------- | ------------- | ----------------- | ------------------------------- |
-| **Configuration**         |               |                   |                                 |
-| `name`                    | e3sm_timing   | `case`            | Case name                       |
-| `case_name`               | e3sm_timing   | `case`            | Same as name                    |
-| `description`             | N/A           | -                 | Not extracted by PACE           |
-| `compset`                 | README.case   | `compset` (short) | e.g., `F2010`                   |
-| `compset_alias`           | e3sm_timing   | `long_compset`    | Full component set              |
-| `grid_name`               | README.case   | `res` (short)     | e.g., `ne30_ne30`               |
-| `grid_resolution`         | e3sm_timing   | `long_res`        | Full grid spec                  |
-| `parent_simulation_id`    | N/A           | -                 | Not tracked by PACE             |
-| **Model setup / context** |               |                   |                                 |
-| `simulation_type`         | N/A           | -                 | Could be inferred               |
-| `status`                  | N/A           | -                 | PACE only stores completed runs |
-| `campaign_id`             | N/A           | -                 | Not tracked by PACE             |
-| `experiment_type_id`      | N/A           | -                 | Not tracked by PACE             |
-| `initialization_type`     | e3sm_timing   | `run_type`        | From “run type”                 |
-| `group_name`              | env_case.xml  | `case_group`      | CASE_GROUP                      |
-| **Model timeline**        |               |                   |                                 |
-| `machine_id`              | e3sm_timing   | machine name      | Requires lookup                 |
-| `simulation_start_date`   | e3sm_timing   | `exp_date`        | From “Curr Date”                |
-| `simulation_end_date`     | N/A           | -                 | Not tracked                     |
-| `run_start_date`          | CaseStatus    | `RUN_STARTDATE`   | Parsed                          |
-| `run_end_date`            | Derived       | -                 | Optional                        |
-| `compiler`                | env_build.xml | `COMPILER`        |                                 |
-| **Version control**       |               |                   |                                 |
-| `git_repository_url`      | GIT_CONFIG    | -                 |                                 |
-| `git_branch`              | GIT_CONFIG    | -                 |                                 |
-| `git_tag`                 | GIT_DESCRIBE  | `version`         | Git describe                    |
-| `git_commit_hash`         | GIT_DESCRIBE  | `version`         | Parsed                          |
-| **Provenance**            |               |                   |                                 |
-| `created_by`              | N/A           | -                 | Assigned by SimBoard            |
-| `last_updated_by`         | N/A           | -                 | Assigned by SimBoard            |
-| **Miscellaneous**         |               |                   |                                 |
-| `key_features`            | N/A           | -                 | Not tracked                     |
-| `known_issues`            | N/A           | -                 | Not tracked                     |
-| `notes_markdown`          | N/A           | -                 | Not tracked                     |
-| `extra`                   | Multiple      | Various           | Non-core metadata               |
+Nice, this is a good place to tighten the contract between PACE → backend → UI 👍
+Below is your **updated table** with two new columns:
+
+* **Required?** — per `SimulationCreate` (required vs optional at create time)
+* **Assigned by** — where the value is expected to come from:
+
+  * **PACE** (parsed / inferred during ingestion)
+  * **SimBoard UI** (user-entered)
+  * **Backend (auto)** (derived, looked up, or set server-side)
+
+I stayed faithful to the FastAPI model and your notes.
+
+---
+
+### Configuration
+
+| SimBoard Field         | PACE Source | PACE Field/File   | Required?    | Assigned by         | Notes                 |
+| ---------------------- | ----------- | ----------------- | ------------ | ------------------- | --------------------- |
+| `name`                 | e3sm_timing | `case`            | **Required** | Backend (from PACE) | Case name             |
+| `case_name`            | e3sm_timing | `case`            | **Required** | Backend (from PACE) | Same as `name`        |
+| `description`          | N/A         | -                 | Optional     | SimBoard UI         | Not extracted by PACE |
+| `compset`              | README.case | `compset` (short) | **Required** | Backend (from PACE) | e.g., `F2010`         |
+| `compset_alias`        | e3sm_timing | `long_compset`    | **Required** | Backend (from PACE) | Full component set    |
+| `grid_name`            | README.case | `res` (short)     | **Required** | Backend (from PACE) | e.g., `ne30_ne30`     |
+| `grid_resolution`      | e3sm_timing | `long_res`        | **Required** | Backend (from PACE) | Full grid spec        |
+| `parent_simulation_id` | N/A         | -                 | Optional     | SimBoard UI         | Not tracked by PACE   |
+
+---
+
+### Model setup / context
+
+| SimBoard Field        | PACE Source  | PACE Field/File | Required?    | Assigned by              | Notes                                              |
+| --------------------- | ------------ | --------------- | ------------ | ------------------------ | -------------------------------------------------- |
+| `simulation_type`     | N/A          | -               | **Required** | Backend (inferred) or UI | Could be inferred (e.g., production, test, branch) |
+| `status`              | N/A          | -               | **Required** | Backend (auto)           | Initial status set on creation                     |
+| `campaign_id`         | N/A          | -               | Optional     | SimBoard UI              | Not tracked by PACE                                |
+| `experiment_type_id`  | N/A          | -               | Optional     | SimBoard UI              | Not tracked by PACE                                |
+| `initialization_type` | e3sm_timing  | `run_type`      | **Required** | Backend (from PACE)      | From “run type”                                    |
+| `group_name`          | env_case.xml | `case_group`    | Optional     | Backend (from PACE)      | CASE_GROUP                                         |
+
+---
+
+### Model timeline
+
+| SimBoard Field          | PACE Source   | PACE Field/File | Required?    | Assigned by         | Notes                        |
+| ----------------------- | ------------- | --------------- | ------------ | ------------------- | ---------------------------- |
+| `machine_id`            | e3sm_timing   | machine name    | **Required** | Backend (lookup)    | Requires mapping name → UUID |
+| `simulation_start_date` | e3sm_timing   | `exp_date`      | **Required** | Backend (from PACE) | From “Curr Date”             |
+| `simulation_end_date`   | N/A           | -               | Optional     | Backend (derived)   | Often unknown at ingest      |
+| `run_start_date`        | CaseStatus    | `RUN_STARTDATE` | Optional     | Backend (from PACE) | Parsed                       |
+| `run_end_date`          | Derived       | -               | Optional     | Backend (derived)   | Optional                     |
+| `compiler`              | env_build.xml | `COMPILER`      | Optional     | Backend (from PACE) |                              |
+
+---
+
+### Version control
+
+| SimBoard Field       | PACE Source  | PACE Field/File | Required? | Assigned by         | Notes        |
+| -------------------- | ------------ | --------------- | --------- | ------------------- | ------------ |
+| `git_repository_url` | GIT_CONFIG   | -               | Optional  | Backend (from PACE) |              |
+| `git_branch`         | GIT_CONFIG   | -               | Optional  | Backend (from PACE) |              |
+| `git_tag`            | GIT_DESCRIBE | `version`       | Optional  | Backend (from PACE) | Git describe |
+| `git_commit_hash`    | GIT_DESCRIBE | `version`       | Optional  | Backend (from PACE) | Parsed       |
+
+---
+
+### Provenance & audit
+
+| SimBoard Field    | PACE Source | PACE Field/File | Required? | Assigned by    | Notes                       |
+| ----------------- | ----------- | --------------- | --------- | -------------- | --------------------------- |
+| `created_by`      | N/A         | -               | Optional* | Backend (auth) | Set from authenticated user |
+| `last_updated_by` | N/A         | -               | Optional* | Backend (auth) | Set on update               |
+
+* Optional in schema, but effectively required in authenticated workflows.
+
+---
+
+### Miscellaneous / user annotation
+
+| SimBoard Field   | PACE Source | PACE Field/File | Required? | Assigned by  | Notes             |
+| ---------------- | ----------- | --------------- | --------- | ------------ | ----------------- |
+| `key_features`   | N/A         | -               | Optional  | SimBoard UI  | User input        |
+| `known_issues`   | N/A         | -               | Optional  | SimBoard UI  | User input        |
+| `notes_markdown` | N/A         | -               | Optional  | SimBoard UI  | User input        |
+| `extra`          | Multiple    | Various         | Optional  | Backend / UI | Non-core metadata |
+
+---
+### Absolute minimum required fields
+
+```python
+name
+case_name
+compset
+compset_alias
+grid_name
+grid_resolution
+simulation_type
+status
+initialization_type
+machine_id
+simulation_start_date
+```
 
 ---
 
