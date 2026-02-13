@@ -231,7 +231,71 @@ From `timing.*.tar.gz`:
 
 # 4. REST Call Flow
 
-## 4.1 Upload Stage (`/upload`)
+## 4.1 Flow Diagram
+
+The following diagram illustrates the complete cron-driven ingestion flow:
+
+```mermaid
+sequenceDiagram
+    participant Cron as HPC Cron Job
+    participant CLI as pace-upload
+    participant Upload as POST /upload
+    participant FS as UPLOAD_FOLDER
+    participant Parse as POST /fileparse
+    participant Orch as parseE3SM
+    participant Parsers as Parsers
+    participant DB as Database
+    participant Minio as Minio
+
+    Note over Cron: Nightly execution
+    Cron->>CLI: Execute pace-upload
+    CLI->>CLI: Validate & compress
+    
+    CLI->>Upload: Upload zip
+    Upload->>FS: Save file
+    Upload-->>CLI: "complete"
+    
+    CLI->>Parse: Trigger parse
+    activate Parse
+    Parse->>Orch: parseData()
+    activate Orch
+    
+    Orch->>FS: Extract zip
+    Orch->>Orch: Discover exp* dirs
+    
+    loop For each experiment
+        Orch->>Parsers: parseE3SMTiming
+        Parsers-->>Orch: metadata
+        Orch->>Parsers: parseReadMe
+        Parsers-->>Orch: res, compset
+        
+        alt Duplicate
+            Orch->>Orch: Skip
+        else New
+            Orch->>Parsers: Parse timing, config
+            Parsers-->>Orch: data
+            Orch->>DB: Insert & commit
+            Orch->>Minio: Archive
+        end
+    end
+    
+    Orch->>FS: Cleanup
+    Orch-->>Parse: "success"
+    deactivate Orch
+    Parse-->>CLI: Result + log
+    deactivate Parse
+```
+
+**Key observations:**
+
+* Fully synchronous – `/fileparse` blocks until complete
+* Batch processing – one upload can contain multiple experiments
+* Continue-on-error – duplicates or failures don't abort batch
+* Filesystem intermediary – staging directory decouples upload from parse
+
+---
+
+## 4.2 Upload Stage (`/upload`)
 
 * Accept zip
 * Validate extension
@@ -242,7 +306,7 @@ No parsing occurs here.
 
 ---
 
-## 4.2 Parse Stage (`/fileparse`)
+## 4.3 Parse Stage (`/fileparse`)
 
 * Validate user (regex)
 * Validate filename (pattern)
@@ -253,7 +317,7 @@ This call blocks until parsing finishes.
 
 ---
 
-## 4.3 Orchestration Flow
+## 4.4 Orchestration Flow
 
 ```
 /fileparse
